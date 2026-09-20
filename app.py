@@ -256,13 +256,19 @@ def add_market_comparison(df):
 
     work = df.copy()
     tcg = pd.to_numeric(work.get("TCG NM"), errors="coerce")
-    ebay = pd.to_numeric(work.get("eBay NM"), errors="coerce")
+    if "eBay sold avg 30d" not in work:
+        work["eBay sold avg 30d"] = pd.NA
+    ebay = pd.to_numeric(work["eBay sold avg 30d"], errors="coerce")
     work["Price sources"] = (
         tcg.notna().astype(int) + ebay.notna().astype(int)
     ).map({0: "Ei hintaa", 1: "1 lähde", 2: "2 lähdettä"})
     work["US reference"] = pd.concat([tcg, ebay], axis=1).median(axis=1, skipna=True)
-    work["TCG vs eBay %"] = ((tcg - ebay) / ebay.replace(0, pd.NA) * 100).round(1)
-    work["TCG below eBay"] = (tcg < ebay).where(tcg.notna() & ebay.notna())
+    work["TCG vs eBay sold %"] = (
+        (tcg - ebay) / ebay.replace(0, pd.NA) * 100
+    ).round(1)
+    work["TCG below eBay sold"] = (tcg < ebay).where(
+        tcg.notna() & ebay.notna()
+    )
     return work
 
 
@@ -661,9 +667,26 @@ def get_period_sales(key, card_id, period):
     tcg_sold = sum(int(row.get("saleCount") or 0) for row in tcg_rows)
     ebay_sold = sum(int(row.get("saleCount") or 0) for row in ebay_rows)
 
+    def sale_price(row):
+        for field in ("salePrice", "soldPrice", "price"):
+            value = safe_num(row.get(field))
+            if value is not None:
+                return value
+        return None
+
+    ebay_sale_prices = [
+        price for price in (sale_price(row) for row in ebay_rows)
+        if price is not None
+    ]
+
     return {
         "tcg": tcg_sold,
         "ebay": ebay_sold,
+        "ebay_sold_avg": (
+            sum(ebay_sale_prices) / len(ebay_sale_prices)
+            if ebay_sale_prices
+            else None
+        ),
     }
 
 
@@ -679,6 +702,7 @@ def enrich_period_sales(key, df, period, max_rows, plan):
 
     tcg_values = []
     ebay_values = []
+    ebay_sold_prices = []
     errors = []
 
     progress = st.progress(0)
@@ -690,13 +714,16 @@ def enrich_period_sales(key, df, period, max_rows, plan):
             sold = get_period_sales(key, row["id"], period)
             tcg_values.append(sold["tcg"])
             ebay_values.append(sold["ebay"])
+            ebay_sold_prices.append(sold["ebay_sold_avg"])
         except requests.RequestException as exc:
             tcg_values.append(None)
             ebay_values.append(None)
+            ebay_sold_prices.append(None)
             errors.append(f"{row['Kortti']}: verkkopyyntö epäonnistui ({exc})")
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             tcg_values.append(None)
             ebay_values.append(None)
+            ebay_sold_prices.append(None)
             errors.append(f"{row['Kortti']}: historiadataa ei voitu lukea ({exc})")
 
         progress.progress(i / len(work))
@@ -709,6 +736,7 @@ def enrich_period_sales(key, df, period, max_rows, plan):
 
     work[f"Myyty {period} TCG"] = tcg_values
     work[f"Myyty {period} eBay"] = ebay_values
+    work[f"eBay sold avg {period}"] = ebay_sold_prices
     work["_history_errors"] = [errors if i == 0 else [] for i in range(len(work))]
 
     work = work.sort_values(
@@ -781,7 +809,7 @@ st.markdown(
     <section class="hero">
       <div class="eyebrow">Market intelligence · raw only</div>
       <h1>US market signal scanner</h1>
-      <p>Vertaa USA:n TCGplayer- ja eBay-hintoja, vahvista 30 päivän myyntiliike ja vie parhaat 50 korttia käsin tehtävään EU-tarkistukseen.</p>
+      <p>Vertaa USA:n TCGplayer-hintaa toteutuneisiin eBay-myyntihintoihin, vahvista 30 päivän myyntiliike ja vie parhaat 50 korttia käsin tehtävään EU-tarkistukseen.</p>
     </section>
     """,
     unsafe_allow_html=True,
@@ -855,8 +883,8 @@ with st.sidebar:
     show_top = st.selectbox("Näytä tuloksia", [20, 50, 100], index=1)
 
     st.info(
-        "USA-seulonta käyttää TCGplayer Near Mint -hintaa ja näyttää eBay-hinnan "
-        "ristiinvertailuna. EU-hinta tarkistetaan käsin ladatusta Top 50 -listasta."
+        "USA-seulonta käyttää TCGplayer Near Mint -hintaa. eBay näkyy vertailuna "
+        "vain silloin, kun historiasta löytyy toteutuneen myynnin hinta."
     )
 
     st.divider()
@@ -885,7 +913,7 @@ with tab_scan:
     st.subheader("Löydä USA:n varhainen kysyntä")
     st.markdown(
         '<div class="callout"><strong>Työvaihe 1:</strong> skannaa USA:n kortit. '
-        'TCGplayer on päävertailu; eBay toimii toisena hintalähteenä. '
+        'TCGplayer on päävertailu; eBay toimii toisena lähteenä vain toteutuneilla myynneillä. '
         'Vahvista sen jälkeen TCGplayerin oikea 30 päivän myyntimäärä.</div>',
         unsafe_allow_html=True,
     )
@@ -1061,9 +1089,9 @@ with tab_scan:
                 "Numero",
                 "Variant",
                 "TCG NM",
-                "eBay NM",
+                "eBay sold avg 30d",
                 "US reference",
-                "TCG vs eBay %",
+                "TCG vs eBay sold %",
                 "Price sources",
                 "Signal",
                 "Signal score",
@@ -1106,14 +1134,14 @@ with tab_scan:
                     "TCG NM": st.column_config.NumberColumn(
                         "TCG NM", format="$%.2f", width="small"
                     ),
-                    "eBay NM": st.column_config.NumberColumn(
-                        "eBay NM", format="$%.2f", width="small"
+                    "eBay sold avg 30d": st.column_config.NumberColumn(
+                        "eBay sold avg 30d", format="$%.2f", width="small"
                     ),
                     "US reference": st.column_config.NumberColumn(
                         "US ref.", format="$%.2f", width="small"
                     ),
-                    "TCG vs eBay %": st.column_config.NumberColumn(
-                        "TCG/eBay Δ", format="%+.1f%%", width="small"
+                    "TCG vs eBay sold %": st.column_config.NumberColumn(
+                        "TCG/eBay sold Δ", format="%+.1f%%", width="small"
                     ),
                     "Price sources": st.column_config.TextColumn(
                         "Hintalähteet", width="small"
