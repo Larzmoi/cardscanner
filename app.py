@@ -21,6 +21,9 @@ POKETRACE_BASE = "https://api.poketrace.com/v1"
 RAREBIT_BASE = "https://api.rarebit.app/api"
 PRICECHARTING_BASE = "https://www.pricecharting.com"
 
+# Hard pre-filter for raw cards. US source prices are USD.
+HARD_MIN_RAW_PRICE = 1.00
+
 st.markdown(
     """
     <style>
@@ -224,7 +227,252 @@ def card_matches_price(row, min_price, max_price):
     price = row.get("TCG NM")
     if price is None:
         return False
-    return min_price <= price <= max_price
+
+    # Stage 1: always reject sub-$1 raw cards before they enter the
+    # candidate pool or become eligible for any later/history API calls.
+    effective_min = max(float(min_price), HARD_MIN_RAW_PRICE)
+
+    return effective_min <= price <= max_price
+
+
+
+# ============================================================
+# SET CATALOG / BROAD COVERAGE
+# ============================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_all_sets(key, game, plan):
+    """Load the set catalog once and cache it for a day."""
+    rows = []
+    cursor = None
+
+    # Use conservative page size. /sets supports cursor pagination.
+    while True:
+        params = {
+            "game": game,
+            "limit": 50,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        payload, _ = poketrace_get("/sets", key, params)
+        data = payload.get("data") or []
+        rows.extend(data)
+
+        pagination = payload.get("pagination") or {}
+        cursor = pagination.get("nextCursor")
+        has_more = bool(pagination.get("hasMore")) and bool(cursor)
+
+        if not has_more:
+            break
+
+        time.sleep(free_plan_delay(plan))
+
+        # Hard safety stop.
+        if len(rows) > 2000:
+            break
+
+    sets_df = pd.DataFrame(
+        [
+            {
+                "slug": row.get("slug"),
+                "name": row.get("name"),
+                "releaseDate": row.get("releaseDate"),
+                "cardCount": row.get("cardCount"),
+            }
+            for row in rows
+            if row.get("slug")
+        ]
+    )
+
+    if sets_df.empty:
+        return sets_df
+
+    sets_df["releaseDateParsed"] = pd.to_datetime(
+        sets_df["releaseDate"], errors="coerce"
+    )
+
+    return sets_df.sort_values(
+        ["releaseDateParsed", "name"],
+        ascending=[False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
+def balanced_set_batch(sets_df, batch_size, round_no, mode):
+    """
+    Return a varied batch of sets.
+
+    Balanced mode immediately spreads the requests over the full release
+    timeline instead of taking Base Set, Base Set 2, ... consecutively.
+    """
+    if sets_df.empty:
+        return sets_df
+
+    work = sets_df.copy().reset_index(drop=True)
+    n = len(work)
+    batch_size = max(1, min(int(batch_size), n))
+
+    if mode == "Uusimmat":
+        start = (round_no * batch_size) % n
+        idx = [(start + i) % n for i in range(batch_size)]
+        return work.iloc[idx].reset_index(drop=True)
+
+    if mode == "Vanhimmat":
+        work = work.iloc[::-1].reset_index(drop=True)
+        start = (round_no * batch_size) % n
+        idx = [(start + i) % n for i in range(batch_size)]
+        return work.iloc[idx].reset_index(drop=True)
+
+    # "Tasaisesti kaikki"
+    # Divide the entire chronology into batch_size lanes. Each successive
+    # round advances one position inside every lane.
+    idx = []
+    for lane in range(batch_size):
+        start = int(lane * n / batch_size)
+        end = int((lane + 1) * n / batch_size)
+        lane_len = max(1, end - start)
+        pos = start + (round_no % lane_len)
+        if pos < n:
+            idx.append(pos)
+
+    # Keep unique positions while preserving order.
+    seen = set()
+    unique_idx = []
+    for i in idx:
+        if i not in seen:
+            unique_idx.append(i)
+            seen.add(i)
+
+    return work.iloc[unique_idx].reset_index(drop=True)
+
+
+def fetch_cards_from_set(
+    key,
+    set_slug,
+    game,
+    variant,
+    cursor=None,
+):
+    params = {
+        "market": "US",
+        "game": game,
+        "product_type": "single",
+        "set": set_slug,
+        "limit": 20,
+    }
+
+    if variant != "Kaikki":
+        params["variant"] = variant
+
+    if cursor:
+        params["cursor"] = cursor
+
+    payload, headers = poketrace_get("/cards", key, params)
+    pagination = payload.get("pagination") or {}
+
+    return (
+        payload.get("data") or [],
+        pagination.get("nextCursor"),
+        bool(pagination.get("hasMore")),
+        headers,
+    )
+
+
+def scan_across_sets(
+    key,
+    plan,
+    sets_df,
+    sets_per_scan,
+    min_price,
+    max_price,
+    game,
+    variant,
+    coverage_mode,
+    reset=False,
+):
+    """
+    Scan one page from several different sets per run.
+
+    This is intentionally different from global /cards cursor pagination,
+    which begins with the oldest catalog records and therefore produced
+    Base Set / Base Set 2 repeatedly.
+    """
+    if reset:
+        st.session_state["broad_pool"] = []
+        st.session_state["broad_round"] = 0
+        st.session_state["broad_scanned_cards"] = 0
+        st.session_state["broad_scanned_sets"] = []
+        st.session_state["set_cursors"] = {}
+
+    pool = list(st.session_state.get("broad_pool", []))
+    round_no = int(st.session_state.get("broad_round", 0))
+    scanned_cards = int(st.session_state.get("broad_scanned_cards", 0))
+    scanned_sets = list(st.session_state.get("broad_scanned_sets", []))
+    set_cursors = dict(st.session_state.get("set_cursors", {}))
+
+    existing_ids = {r.get("id") for r in pool if r.get("id")}
+
+    batch = balanced_set_batch(
+        sets_df,
+        sets_per_scan,
+        round_no,
+        coverage_mode,
+    )
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    for i, (_, set_row) in enumerate(batch.iterrows(), start=1):
+        slug = str(set_row["slug"])
+        set_name = str(set_row["name"])
+
+        status.caption(
+            f"{i}/{len(batch)} • {set_name} • löydetty hintaan {len(pool)}"
+        )
+
+        cursor = set_cursors.get(slug)
+
+        cards, next_cursor, has_more, _ = fetch_cards_from_set(
+            key=key,
+            set_slug=slug,
+            game=game,
+            variant=variant,
+            cursor=cursor,
+        )
+
+        for card in cards:
+            parsed = parse_us_card(card)
+            if parsed["id"] and parsed["id"] not in existing_ids:
+                if card_matches_price(parsed, min_price, max_price):
+                    pool.append(parsed)
+                    existing_ids.add(parsed["id"])
+
+        scanned_cards += len(cards)
+        scanned_sets.append(set_name)
+
+        # Keep a per-set cursor. If the set ends, restart at page 1 next time
+        # only after other sets have had their turns.
+        if has_more and next_cursor:
+            set_cursors[slug] = next_cursor
+        else:
+            set_cursors.pop(slug, None)
+
+        progress.progress(i / len(batch))
+
+        if i < len(batch):
+            time.sleep(free_plan_delay(plan))
+
+    st.session_state["broad_pool"] = pool
+    st.session_state["broad_round"] = round_no + 1
+    st.session_state["broad_scanned_cards"] = scanned_cards
+    st.session_state["broad_scanned_sets"] = scanned_sets[-200:]
+    st.session_state["set_cursors"] = set_cursors
+
+    progress.empty()
+    status.empty()
+
+    return pd.DataFrame(pool), batch
 
 
 # ============================================================
@@ -454,7 +702,11 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     min_price = col1.number_input(
-        "Min $", min_value=0.0, value=5.0, step=1.0
+        "Min $",
+        min_value=HARD_MIN_RAW_PRICE,
+        value=5.0,
+        step=1.0,
+        help="Alle $1 raw-kortit jätetään aina scannerin ulkopuolelle.",
     )
     max_price = col2.number_input(
         "Max $", min_value=0.0, value=20.0, step=1.0
@@ -483,11 +735,24 @@ with st.sidebar:
         index=0,
     )
 
-    pages_per_scan = st.selectbox(
-        "Sivuja / skannaus",
-        [3, 5, 10, 20],
+    coverage_mode = st.selectbox(
+        "Kattavuus",
+        ["Tasaisesti kaikki", "Uusimmat", "Vanhimmat"],
+        index=0,
+        help=(
+            "Tasaisesti kaikki poimii jokaisella ajolla settejä eri kohdista "
+            "Pokémonin julkaisuhistoriaa, eikä aloita aina Base Setistä."
+        ),
+    )
+
+    sets_per_scan = st.selectbox(
+        "Settejä / skannaus",
+        [5, 10, 15, 20],
         index=1,
-        help="Yksi sivu = enintään 20 korttia ja yksi PokeTrace API -request.",
+        help=(
+            "Jokaisesta valitusta setistä haetaan yksi sivu, enintään 20 korttia. "
+            "Free-planilla 10 settiä kestää noin 20 sekuntia."
+        ),
     )
 
     show_top = st.selectbox(
@@ -496,9 +761,14 @@ with st.sidebar:
         index=1,
     )
 
+    st.info(
+        "Esifiltteri: kaikki alle $1 raw/NM-kortit hylätään heti. "
+        "Niitä ei lisätä candidate-pooliin eikä niille tehdä myöhempiä history-hakuja."
+    )
+
     st.divider()
     st.caption(
-        "Free PokeTrace: 250 requestia/päivä ja 1 request / 2 sekuntia."
+        "Free PokeTrace: 250 requestia/päivä ja noin 1 request / 2 sekuntia."
     )
 
 
@@ -538,88 +808,115 @@ with tab_scan:
                 "plan": "Unknown",
                 "remaining": "–",
                 "limit": "–",
-                "resetsAt": None,
             }
             plan = "Unknown"
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Plan", plan_info["plan"])
         c2.metric("API jäljellä", plan_info["remaining"] or "–")
-        c3.metric("Skannattu", st.session_state.get("pt_scanned_cards", 0))
-        c4.metric("Hintaan osuvia", len(st.session_state.get("pt_pool", [])))
-
-        b1, b2, b3 = st.columns([1, 1, 1])
-
-        start_scan = b1.button(
-            "🔄 Uusi skannaus",
-            type="primary",
-            use_container_width=True,
+        c3.metric(
+            "Kortteja tarkistettu",
+            st.session_state.get("broad_scanned_cards", 0),
         )
-        continue_scan = b2.button(
-            "▶ Jatka seuraaviin",
-            use_container_width=True,
-            disabled=not bool(st.session_state.get("pt_pool"))
-            and st.session_state.get("pt_scanned_cards", 0) == 0,
+        c4.metric(
+            "Hintaan osuvia",
+            len(st.session_state.get("broad_pool", [])),
         )
-        clear_scan = b3.button(
-            "Tyhjennä",
-            use_container_width=True,
-        )
+        c5.metric("Hard floor", f"${HARD_MIN_RAW_PRICE:.2f}")
 
-        if clear_scan:
-            for key in [
-                "pt_cursor",
-                "pt_has_more",
-                "pt_scanned_cards",
-                "pt_pool",
-                "period_result",
-            ]:
-                st.session_state.pop(key, None)
-            st.rerun()
+        try:
+            with st.spinner("Ladataan settikatalogi..."):
+                sets_df = load_all_sets(pt_key, game, plan)
+        except Exception as exc:
+            sets_df = pd.DataFrame()
+            st.error(f"Settien lataus epäonnistui: {exc}")
 
-        if max_price < min_price:
-            st.error("Max-hinnan pitää olla vähintään Min-hinta.")
-        elif start_scan or continue_scan:
-            try:
-                pool_df, headers = scan_poketrace_pages(
-                    key=pt_key,
-                    plan=plan,
-                    pages=pages_per_scan,
-                    min_price=min_price,
-                    max_price=max_price,
-                    game=game,
-                    variant=variant,
-                    reset=start_scan,
-                )
-            except Exception as exc:
-                st.error(str(exc))
+        if not sets_df.empty:
+            st.caption(
+                f"PokeTrace-katalogissa löytyi **{len(sets_df)} {language}-settiä**. "
+                "Scanneri hakee niistä eri settejä rinnakkain eikä kulje "
+                "globaalin katalogin alusta."
+            )
 
-        pool = pd.DataFrame(st.session_state.get("pt_pool", []))
+            b1, b2, b3 = st.columns(3)
+
+            start_scan = b1.button(
+                "🔄 Uusi laaja skannaus",
+                type="primary",
+                use_container_width=True,
+            )
+            continue_scan = b2.button(
+                "▶ Jatka eri setteihin",
+                use_container_width=True,
+            )
+            clear_scan = b3.button(
+                "Tyhjennä tulokset",
+                use_container_width=True,
+            )
+
+            if clear_scan:
+                for key in [
+                    "broad_pool",
+                    "broad_round",
+                    "broad_scanned_cards",
+                    "broad_scanned_sets",
+                    "set_cursors",
+                    "period_result",
+                ]:
+                    st.session_state.pop(key, None)
+                st.rerun()
+
+            if max_price < min_price:
+                st.error("Max-hinnan pitää olla vähintään Min-hinta.")
+            elif start_scan or continue_scan:
+                try:
+                    with st.spinner("Skannataan eri settejä..."):
+                        pool_df, batch = scan_across_sets(
+                            key=pt_key,
+                            plan=plan,
+                            sets_df=sets_df,
+                            sets_per_scan=sets_per_scan,
+                            min_price=min_price,
+                            max_price=max_price,
+                            game=game,
+                            variant=variant,
+                            coverage_mode=coverage_mode,
+                            reset=start_scan,
+                        )
+
+                    if not batch.empty:
+                        st.success(
+                            "Tällä kierroksella tarkistetut setit: "
+                            + ", ".join(batch["name"].astype(str).tolist())
+                        )
+                except Exception as exc:
+                    st.error(str(exc))
+
+        pool = pd.DataFrame(st.session_state.get("broad_pool", []))
 
         if pool.empty:
             st.info(
-                "Paina **Uusi skannaus**. Sen jälkeen voit painaa "
-                "**Jatka seuraaviin**, jolloin appi jatkaa katalogissa siitä "
-                "mihin edellinen haku jäi eikä hae aina samoja kortteja."
+                "Paina **Uusi laaja skannaus**. Oletus `Tasaisesti kaikki` "
+                "hakee saman tien eri aikakausien settejä."
             )
         else:
             sort_mode = st.radio(
                 "Järjestys",
                 [
-                    "TCG historical sales",
-                    "7d price momentum",
-                    "eBay historical sales",
+                    "Eniten historiallisia TCG-myyntihavaintoja",
+                    "7d hintamomentum",
+                    "Eniten eBay-myyntihavaintoja",
                 ],
                 horizontal=True,
             )
 
-            if sort_mode == "TCG historical sales":
+            if sort_mode == "Eniten historiallisia TCG-myyntihavaintoja":
                 pool = pool.sort_values(
                     ["TCG sales hist.", "7d vs 30d %"],
                     ascending=[False, False],
                     na_position="last",
                 )
-            elif sort_mode == "7d price momentum":
+            elif sort_mode == "7d hintamomentum":
                 pool = pool.sort_values(
                     ["7d vs 30d %", "TCG sales hist."],
                     ascending=[False, False],
@@ -649,11 +946,11 @@ with tab_scan:
                 ]
             ].copy()
 
-            st.caption(
-                "`TCG sales hist.` on PokeTracen TCGplayer-lähteen "
-                "kumulatiivinen historiallinen saleCount. Se ei ole 30 päivän "
-                "luku. Tarkka 7/14/30d määrä lasketaan seuraavalla välilehdellä "
-                "history-datasta, jos API-plan sallii sen."
+            st.warning(
+                "Free-tilan `TCG sales` on PokeTracen kumulatiivinen historiallinen "
+                "saleCount, ei viimeisen 30 päivän määrä. Tämä näkymä rankkaa "
+                "vain ne kortit, jotka on jo skannattu eri seteistä. "
+                "Pro-historylla 7/14/30d-välilehti laskee oikean ajanjakson."
             )
 
             st.dataframe(
@@ -690,10 +987,11 @@ with tab_scan:
             st.download_button(
                 "Lataa scannerin CSV",
                 pool.to_csv(index=False).encode("utf-8-sig"),
-                file_name="pokemon_scanner_pool.csv",
+                file_name="pokemon_scanner_broad_pool.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
+
 
 
 # ============================================================
@@ -702,7 +1000,7 @@ with tab_scan:
 
 with tab_history:
     pt_key = provider_key("PokeTrace")
-    pool = pd.DataFrame(st.session_state.get("pt_pool", []))
+    pool = pd.DataFrame(st.session_state.get("broad_pool", []))
 
     st.subheader("Todelliset myynnit valitulta ajalta")
 
@@ -952,5 +1250,5 @@ CARDMARKETAPI_KEY = "..."
 
 st.divider()
 st.caption(
-    "v0.4 • PokeTrace direct catalog scan • no TCG rank • raw only"
+    "v0.4.2 • $1 hard pre-filter • broad set scan • raw only"
 )
