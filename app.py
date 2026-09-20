@@ -233,7 +233,7 @@ def parse_us_card(card):
         "Rarity": card.get("rarity") or "",
         "TCG NM": tcg_avg,
         "TCG low": tcg_low,
-        "TCG sales hist.": int(tcg.get("saleCount") or 0),
+        "TCG cumulative saleCount proxy": int(tcg.get("saleCount") or 0),
         "TCG approx": bool(tcg.get("approxSaleCount", False)),
         "TCG 1d avg": tcg_avg1,
         "TCG 7d avg": tcg_avg7,
@@ -242,7 +242,7 @@ def parse_us_card(card):
         "1d vs 7d %": pct_change(tcg_avg1, tcg_avg7),
         "eBay NM": safe_num(ebay.get("avg")),
         "eBay low": safe_num(ebay.get("low")),
-        "eBay sales hist.": int(ebay.get("saleCount") or 0),
+        "eBay cumulative saleCount proxy": int(ebay.get("saleCount") or 0),
         "eBay approx": bool(ebay.get("approxSaleCount", True)),
         "TCGplayer ID": refs.get("tcgplayerId"),
         "Last updated": card.get("lastUpdated"),
@@ -695,7 +695,7 @@ def enrich_period_sales(key, df, period, max_rows, plan):
         return df
 
     work = df.sort_values(
-        ["TCG sales hist.", "7d vs 30d %"],
+        ["7d vs 30d %", "TCG 30d avg"],
         ascending=[False, False],
         na_position="last",
     ).head(max_rows).copy()
@@ -759,8 +759,8 @@ def build_signal_table(df, period="30d"):
         sales = pd.to_numeric(work[sales_col], errors="coerce")
         work["TCG 30d data"] = "Toteutunut jakso"
     else:
-        sales = pd.to_numeric(work.get("TCG sales hist."), errors="coerce")
-        work["TCG 30d data"] = "Kumulatiivinen proxy"
+        sales = pd.Series(0, index=work.index, dtype="float64")
+        work["TCG 30d data"] = "Ei haettu"
 
     momentum = pd.to_numeric(work.get("7d vs 30d %"), errors="coerce").fillna(0)
     price = pd.to_numeric(work.get("TCG NM"), errors="coerce").fillna(0)
@@ -1096,11 +1096,9 @@ with tab_scan:
                 "Signal",
                 "Signal score",
                 "TCG 30d data",
-                "TCG sales hist.",
                 "TCG 7d avg",
                 "TCG 30d avg",
                 "7d vs 30d %",
-                "eBay sales hist.",
             ]
             if "Myyty 30d TCG" in ranked.columns:
                 display_columns.insert(8, "Myyty 30d TCG")
@@ -1108,8 +1106,8 @@ with tab_scan:
 
             if "Myyty 30d TCG" not in ranked:
                 st.warning(
-                    "Näytössä oleva TCG sales hist. on vain kumulatiivinen seulontaproxy. "
-                    "Se ei ole viimeisen 30 päivän myyntimäärä. Vahvista ehdokkaat 30d-painikkeella."
+                    "30 päivän myyntimäärää ei näytetä ennen kuin päiväkohtainen "
+                    "TCGplayer-historia on haettu. Paina ensin **Vahvista TCGplayer 30d**."
                 )
             else:
                 exact = int(pd.to_numeric(ranked["Myyty 30d TCG"], errors="coerce").notna().sum())
@@ -1146,9 +1144,6 @@ with tab_scan:
                     "Price sources": st.column_config.TextColumn(
                         "Hintalähteet", width="small"
                     ),
-                    "TCG sales hist.": st.column_config.NumberColumn(
-                        "TCG sales", format="%d", width="small"
-                    ),
                     "TCG 7d avg": st.column_config.NumberColumn(
                         "7d avg", format="$%.2f", width="small"
                     ),
@@ -1157,9 +1152,6 @@ with tab_scan:
                     ),
                     "7d vs 30d %": st.column_config.NumberColumn(
                         "Δ 7d/30d", format="%+.1f%%", width="small"
-                    ),
-                    "eBay sales hist.": st.column_config.NumberColumn(
-                        "eBay sales", format="%d", width="small"
                     ),
                 },
             )
