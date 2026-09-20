@@ -29,8 +29,9 @@ st.markdown(
     <style>
       @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
       :root { --ink: #202735; --muted: #687181; --accent: #b86b35; --accent-soft: #f3e3d5; --paper: #f7f5f1; --panel: #fffdfa; }
-      html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-      h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.035em; color: var(--ink); }
+      html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: var(--ink); }
+      [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] * { color: var(--ink); }
+      h1, h2, h3, [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.035em; color: var(--ink) !important; }
       [data-testid="stAppViewContainer"] { background: radial-gradient(circle at 86% 0%, #eee5da 0, transparent 34rem), var(--paper); }
       .block-container {
         padding-top: 2.5rem;
@@ -38,22 +39,28 @@ st.markdown(
         max-width: 1420px;
       }
       [data-testid="stMetric"] { background: rgba(255,253,250,.9); border-radius: 1.2rem; padding: .9rem 1rem; box-shadow: 0 12px 32px rgba(38,43,54,.07); }
-      [data-testid="stMetricLabel"] { color: var(--muted); }
-      [data-testid="stMetricValue"] { font-family: 'Space Grotesk', sans-serif; font-size: 1.5rem; }
+      [data-testid="stMetricLabel"], [data-testid="stCaptionContainer"] { color: var(--muted) !important; }
+      [data-testid="stMetricValue"] { font-family: 'Space Grotesk', sans-serif; font-size: 1.5rem; color: var(--ink) !important; }
       div[data-testid="stDataFrame"] { font-size: .82rem; border-radius: 1.2rem; overflow: hidden; }
       .stTabs [data-baseweb="tab"] {
         padding: .65rem 1rem;
         font-weight: 600;
       }
+      .stTabs [data-baseweb="tab"] p, .stTabs [data-baseweb="tab"] div { color: var(--muted) !important; }
+      .stTabs [aria-selected="true"] p, .stTabs [aria-selected="true"] div { color: var(--accent) !important; }
       .stButton > button { border-radius: 999px; min-height: 2.7rem; font-weight: 600; transition: transform .35s cubic-bezier(.32,.72,0,1), box-shadow .35s cubic-bezier(.32,.72,0,1); }
       .stButton > button[kind="primary"] { background: var(--accent); border-color: var(--accent); color: #fffdfa; }
       .stButton > button[kind="primary"]:hover { background: #9f592b; border-color: #9f592b; }
       .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(184,107,53,.16); }
-      [data-testid="stSidebar"] { background: rgba(255,253,250,.86); }
-      .eyebrow { color: var(--accent); font-size: .72rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; margin-bottom: .4rem; }
+      [data-testid="stSidebar"] { background: rgba(255,253,250,.96); }
+      [data-testid="stSidebar"] label, [data-testid="stSidebar"] label p, [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--ink) !important; }
+      [data-testid="stSidebar"] input, [data-testid="stSidebar"] [role="combobox"] { color: var(--ink) !important; background: var(--panel) !important; }
+      [data-testid="stAlert"] p, [data-testid="stAlert"] span { color: var(--ink) !important; }
+      .eyebrow { color: var(--accent) !important; font-size: .72rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; margin-bottom: .4rem; }
       .hero { background: linear-gradient(135deg, rgba(255,253,250,.96), rgba(243,227,213,.86)); border-radius: 2rem; padding: 2rem 2.2rem; margin-bottom: 1.4rem; box-shadow: 0 18px 50px rgba(38,43,54,.08); }
-      .hero p { color: var(--muted); max-width: 48rem; margin-bottom: 0; }
-      .callout { background: rgba(255,253,250,.9); border-left: 4px solid var(--accent); border-radius: 1rem; padding: 1rem 1.1rem; color: var(--muted); }
+      .hero h1 { color: var(--ink) !important; }
+      .hero p { color: var(--muted) !important; max-width: 48rem; margin-bottom: 0; }
+      .callout { background: rgba(255,253,250,.96); border-left: 4px solid var(--accent); border-radius: 1rem; padding: 1rem 1.1rem; color: var(--muted) !important; }
     </style>
     """,
     unsafe_allow_html=True,
