@@ -3,15 +3,15 @@ import io
 import re
 import time
 import unicodedata
-from urllib.parse import quote_plus
+from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
 import streamlit as st
 
-# ------------------------------------------------------------
+# ============================================================
 # CONFIG
-# ------------------------------------------------------------
+# ============================================================
 
 st.set_page_config(
     page_title="Pokémon Card Scanner",
@@ -40,12 +40,41 @@ TCG_TRENDS_URL = (
     "Pok%C3%A9mon%20Price%20Trends%20Report%20-%20August%202026.csv"
 )
 
+POKETRACE_BASE = "https://api.poketrace.com/v1"
 PRICECHARTING_BASE = "https://www.pricecharting.com"
 
+# Compact layout.
+st.markdown(
+    """
+    <style>
+      .block-container {
+        padding-top: 1.3rem;
+        padding-bottom: 1.5rem;
+        max-width: 1500px;
+      }
+      h1 { margin-bottom: .15rem; }
+      [data-testid="stMetric"] {
+        padding: .35rem .65rem;
+      }
+      [data-testid="stMetricValue"] {
+        font-size: 1.45rem;
+      }
+      div[data-testid="stDataFrame"] {
+        font-size: 0.82rem;
+      }
+      .stTabs [data-baseweb="tab"] {
+        padding-top: .45rem;
+        padding-bottom: .45rem;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------
+
+# ============================================================
+# GENERIC HELPERS
+# ============================================================
 
 def normalize_text(value):
     value = "" if value is None else str(value)
@@ -58,28 +87,21 @@ def normalize_text(value):
 
 
 def normalize_key(value):
-    value = normalize_text(value)
-    value = re.sub(r"[^a-z0-9]+", "", value)
-    return value
+    return re.sub(r"[^a-z0-9]+", "", normalize_text(value))
 
 
 def detect_column(columns, candidates):
     normalized = {col: normalize_text(col) for col in columns}
-
-    # exact first
     for candidate in candidates:
         c = normalize_text(candidate)
         for original, norm in normalized.items():
             if norm == c:
                 return original
-
-    # then contains
     for candidate in candidates:
         c = normalize_text(candidate)
         for original, norm in normalized.items():
             if c in norm:
                 return original
-
     return None
 
 
@@ -97,147 +119,111 @@ def money_to_float(series):
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-def numeric_to_float(series):
-    cleaned = (
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.extract(r"(-?\d+(?:\.\d+)?)", expand=False)
-    )
-    return pd.to_numeric(cleaned, errors="coerce")
+def get_secret(name):
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except Exception:
+        return ""
+
+
+def extract_card_number(text):
+    if not text:
+        return ""
+    m = re.search(r"(\d+[A-Za-z]?/\d+[A-Za-z]?)", str(text))
+    return m.group(1) if m else ""
+
+
+def clean_card_name_for_search(text):
+    text = str(text or "")
+    text = re.sub(r"\s*-\s*\d+[A-Za-z]?/\d+[A-Za-z]?\s*$", "", text)
+    text = re.sub(r"\s+\d+[A-Za-z]?/\d+[A-Za-z]?\s*$", "", text)
+    return text.strip()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_csv(url):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 CardScanner/0.2"
-        )
-    }
-    response = requests.get(url, headers=headers, timeout=35, allow_redirects=True)
-    response.raise_for_status()
-
-    first_bytes = response.content[:500].lower()
-    if b"<html" in first_bytes or b"<!doctype" in first_bytes:
-        raise ValueError("Lähde palautti HTML-sivun CSV-tiedoston sijasta.")
-
-    # utf-8-sig handles BOM if present.
-    return pd.read_csv(io.BytesIO(response.content), encoding="utf-8-sig")
+    r = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 CardScanner/0.3"},
+        timeout=35,
+        allow_redirects=True,
+    )
+    r.raise_for_status()
+    if b"<html" in r.content[:500].lower():
+        raise ValueError("CSV-osoite palautti HTML-sivun.")
+    return pd.read_csv(io.BytesIO(r.content), encoding="utf-8-sig")
 
 
-def load_top_selling(min_price, max_price, low_url, high_url):
+# ============================================================
+# TCGPLAYER MONTHLY CANDIDATES
+# ============================================================
+
+def load_top_selling(min_price, max_price):
     frames = []
-    errors = []
 
     if min_price < 50:
-        try:
-            df = fetch_csv(low_url).copy()
-            df["_bucket"] = "$1–49.99"
-            frames.append(df)
-        except Exception as exc:
-            errors.append(f"$1–49.99 raportti: {exc}")
+        df = fetch_csv(TCG_TOP_LOW_URL).copy()
+        df["_bucket"] = "$1–49.99"
+        frames.append(df)
 
     if max_price >= 50:
-        try:
-            df = fetch_csv(high_url).copy()
-            df["_bucket"] = "$50+"
-            frames.append(df)
-        except Exception as exc:
-            errors.append(f"$50+ raportti: {exc}")
+        df = fetch_csv(TCG_TOP_HIGH_URL).copy()
+        df["_bucket"] = "$50+"
+        frames.append(df)
 
     if not frames:
-        return None, errors
+        return pd.DataFrame()
 
-    return pd.concat(frames, ignore_index=True, sort=False), errors
+    return pd.concat(frames, ignore_index=True, sort=False)
 
 
 def parse_top_selling(df):
+    if df.empty:
+        return df
+
     cols = list(df.columns)
 
-    name_col = detect_column(
-        cols, ["product name", "card name", "name", "product", "card"]
-    )
-    set_col = detect_column(
-        cols, ["set name", "set", "expansion", "group name"]
-    )
+    name_col = detect_column(cols, ["product name", "card name", "name", "product"])
+    set_col = detect_column(cols, ["set name", "set", "expansion", "group name"])
     price_col = detect_column(
         cols,
-        [
-            "average sale price",
-            "avg sale price",
-            "average sold price",
-            "average price",
-            "avg price",
-            "sale price",
-        ],
+        ["average sale price", "avg sale price", "average price", "sale price", "price"],
     )
-    sold_col = detect_column(
-        cols,
-        [
-            "copies sold",
-            "total copies sold",
-            "units sold",
-            "quantity sold",
-            "total quantity sold",
-            "total quantity",
-            "sold quantity",
-            "qty sold",
-            "qty",
-            "quantity",
-            "number sold",
-            "copies",
-            "sales volume",
-            "sales",
-            "sold",
-            "units",
-        ],
-    )
-    rank_col = detect_column(cols, ["rank", "ranking", "position"])
 
     if not name_col or not price_col:
-        return None, {
-            "error": "Kortin nimeä tai keskimääräistä myyntihintaa ei tunnistettu.",
-            "columns": cols,
-        }
+        raise ValueError(f"TCGplayer CSV:n sarakkeita ei tunnistettu: {cols}")
 
     out = pd.DataFrame()
     out["Kortti"] = df[name_col].astype(str)
     out["Setti"] = df[set_col].astype(str) if set_col else ""
-    out["Keskim. myyntihinta"] = money_to_float(df[price_col])
+    out["TCG raporttihinta"] = money_to_float(df[price_col])
+    out["TCG candidate rank"] = range(1, len(out) + 1)
+    out["Korttinumero"] = out["Kortti"].map(extract_card_number)
+    out["Hakunimi"] = out["Kortti"].map(clean_card_name_for_search)
+    return out
 
-    if sold_col:
-        out["Myyty kpl"] = numeric_to_float(df[sold_col])
-    else:
-        out["Myyty kpl"] = pd.NA
 
-    if rank_col:
-        out["Raportin sijoitus"] = numeric_to_float(df[rank_col])
-    else:
-        # TCGplayer CSV is already ordered by sales volume.
-        # Preserve source order if an explicit rank/count column is absent.
-        out["Raportin sijoitus"] = range(1, len(out) + 1)
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_candidates(min_price, max_price):
+    raw = load_top_selling(min_price, max_price)
+    parsed = parse_top_selling(raw)
+    if parsed.empty:
+        return parsed
+    return parsed[
+        (parsed["TCG raporttihinta"] >= min_price)
+        & (parsed["TCG raporttihinta"] <= max_price)
+    ].reset_index(drop=True)
 
-    if "_bucket" in df.columns:
-        out["Hintaluokan lähde"] = df["_bucket"].astype(str)
 
-    out = out.dropna(subset=["Keskim. myyntihinta"]).reset_index(drop=True)
-    return out, {"sold_column": sold_col, "rank_column": rank_col}
-
+# ============================================================
+# TCGPLAYER PRICE TRENDS
+# ============================================================
 
 def parse_price_trends(df):
     cols = list(df.columns)
 
-    name_col = detect_column(
-        cols, ["product name", "card name", "name", "product", "card"]
-    )
-    set_col = detect_column(
-        cols, ["set name", "set", "expansion", "group name"]
-    )
-
-    # IMPORTANT:
-    # Detect the OLD price before the current price. TCGplayer's CSV may contain
-    # a column such as "Market Price 30 Days Ago"; a generic "market price"
-    # matcher must never mistake that for the current price.
+    name_col = detect_column(cols, ["product name", "card name", "name", "product"])
+    set_col = detect_column(cols, ["set name", "set", "expansion", "group name"])
     old_col = detect_column(
         cols,
         [
@@ -245,12 +231,8 @@ def parse_price_trends(df):
             "market price 30d ago",
             "starting market price",
             "previous market price",
-            "old market price",
-            "starting price",
-            "previous price",
         ],
     )
-
     current_col = detect_column(
         cols,
         [
@@ -259,830 +241,647 @@ def parse_price_trends(df):
             "market price now",
             "new market price",
             "ending market price",
-            "current price",
         ],
     )
-
     increase_col = detect_column(
         cols,
-        [
-            "price increase",
-            "market price increase",
-            "dollar increase",
-            "change amount",
-            "price change",
-            "increase",
-            "change",
-        ],
+        ["price increase", "market price increase", "dollar increase", "price change"],
     )
-
-    percent_col = detect_column(
+    pct_col = detect_column(
         cols,
-        [
-            "percent increase",
-            "percentage increase",
-            "percent change",
-            "percentage change",
-            "% increase",
-            "% change",
-        ],
-    )
-
-    sales_col = detect_column(
-        cols,
-        [
-            "copies sold",
-            "total copies sold",
-            "units sold",
-            "quantity sold",
-            "total quantity sold",
-            "total quantity",
-            "qty sold",
-            "qty",
-            "quantity",
-            "sales",
-            "sale count",
-            "sales count",
-        ],
+        ["percent increase", "percentage increase", "percent change", "percentage change"],
     )
 
     if not name_col:
-        return None, {"error": "Kortin nimeä ei tunnistettu.", "columns": cols}
+        raise ValueError("Price Trends: kortin nimeä ei tunnistettu.")
 
     out = pd.DataFrame()
     out["Kortti"] = df[name_col].astype(str)
     out["Setti"] = df[set_col].astype(str) if set_col else ""
 
-    old = money_to_float(df[old_col]) if old_col else pd.Series(pd.NA, index=df.index, dtype="Float64")
-    change = money_to_float(df[increase_col]) if increase_col else pd.Series(pd.NA, index=df.index, dtype="Float64")
-    current = money_to_float(df[current_col]) if current_col else pd.Series(pd.NA, index=df.index, dtype="Float64")
+    old = money_to_float(df[old_col]) if old_col else pd.Series(pd.NA, index=df.index)
+    change = money_to_float(df[increase_col]) if increase_col else pd.Series(pd.NA, index=df.index)
+    current = money_to_float(df[current_col]) if current_col else pd.Series(pd.NA, index=df.index)
 
-    # Safety check: if the same source column was accidentally selected for
-    # both old and current, discard "current" and derive it instead.
-    if old_col and current_col and old_col == current_col:
-        current = pd.Series(pd.NA, index=df.index, dtype="Float64")
-        current_col = None
+    old = pd.to_numeric(old, errors="coerce")
+    change = pd.to_numeric(change, errors="coerce")
+    current = pd.to_numeric(current, errors="coerce")
 
-    # Derive missing values using the identity:
-    # current = old + change
-    old_num = pd.to_numeric(old, errors="coerce")
-    change_num = pd.to_numeric(change, errors="coerce")
-    current_num = pd.to_numeric(current, errors="coerce")
+    current = current.fillna(old + change)
+    old = old.fillna(current - change)
+    change = change.fillna(current - old)
 
-    derived_current = old_num + change_num
-    current_num = current_num.fillna(derived_current)
-
-    derived_old = current_num - change_num
-    old_num = old_num.fillna(derived_old)
-
-    # If change itself is missing but both prices exist, derive it.
-    derived_change = current_num - old_num
-    change_num = change_num.fillna(derived_change)
-
-    if percent_col:
-        pct = money_to_float(df[percent_col])
-        valid = pd.to_numeric(pct, errors="coerce").dropna()
+    if pct_col:
+        pct = pd.to_numeric(money_to_float(df[pct_col]), errors="coerce")
+        valid = pct.dropna()
         if len(valid) and valid.abs().median() <= 2:
-            pct = pct * 100
-        pct_num = pd.to_numeric(pct, errors="coerce")
+            pct *= 100
     else:
-        pct_num = pd.Series(pd.NA, index=df.index, dtype="Float64")
+        pct = pd.Series(pd.NA, index=df.index)
 
-    # Always derive % from the actual old/current prices when the source value
-    # is absent. This prevents nonsense such as negative starting prices.
-    derived_pct = (change_num / old_num.replace(0, pd.NA)) * 100
-    pct_num = pct_num.fillna(derived_pct)
+    pct = pct.fillna((change / old.replace(0, pd.NA)) * 100)
 
-    out["Hinta jakson alussa"] = old_num
-    out["Nykyinen market-hinta"] = current_num
-    out["Muutos $"] = change_num
-    out["Muutos %"] = pct_num
+    out["30d alussa"] = old
+    out["30d nyt"] = current
+    out["30d $"] = change
+    out["30d %"] = pct
 
-    if sales_col:
-        out["Myyty kpl 30d"] = numeric_to_float(df[sales_col])
-    else:
-        out["Myyty kpl 30d"] = pd.NA
+    invalid = (out["30d alussa"] < 0) | (out["30d nyt"] < 0)
+    out.loc[invalid, ["30d alussa", "30d nyt", "30d $", "30d %"]] = pd.NA
+    return out
 
-    # Reject impossible derived rows instead of displaying corrupt math.
-    invalid = (
-        (pd.to_numeric(out["Hinta jakson alussa"], errors="coerce") < 0)
-        | (pd.to_numeric(out["Nykyinen market-hinta"], errors="coerce") < 0)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_price_trends():
+    return parse_price_trends(fetch_csv(TCG_TRENDS_URL))
+
+
+# ============================================================
+# POKETRACE
+# ============================================================
+
+def poketrace_get(path, key, params=None):
+    r = requests.get(
+        f"{POKETRACE_BASE}{path}",
+        headers={
+            "X-API-Key": key,
+            "User-Agent": "PokemonCardScanner/0.3",
+        },
+        params=params or {},
+        timeout=30,
     )
-    if invalid.any():
-        out.loc[invalid, ["Hinta jakson alussa", "Nykyinen market-hinta", "Muutos $", "Muutos %"]] = pd.NA
+    if r.status_code >= 400:
+        try:
+            msg = r.json().get("message") or r.json().get("error")
+        except Exception:
+            msg = r.text[:300]
+        raise RuntimeError(f"PokeTrace {r.status_code}: {msg}")
+    return r.json()
 
-    out = out.reset_index(drop=True)
 
-    return out, {
-        "current_column": current_col,
-        "increase_column": increase_col,
-        "percent_column": percent_col,
-        "old_column": old_col,
-        "sales_column": sales_col,
-        "columns": cols,
+@st.cache_data(ttl=600, show_spinner=False)
+def poketrace_auth_info(key):
+    return poketrace_get("/auth/info", key)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def poketrace_search(key, search, card_number=""):
+    params = {
+        "market": "US",
+        "game": "pokemon",
+        "product_type": "single",
+        "search": search,
+        "limit": 20,
+    }
+    if card_number:
+        params["card_number"] = card_number
+    return poketrace_get("/cards", key, params)
+
+
+def score_match(candidate_name, candidate_set, candidate_number, card):
+    score = 0
+    name = str(card.get("name", ""))
+    set_name = str((card.get("set") or {}).get("name", ""))
+    number = str(card.get("cardNumber", ""))
+
+    if normalize_key(name) == normalize_key(candidate_name):
+        score += 6
+    elif normalize_key(candidate_name) in normalize_key(name) or normalize_key(name) in normalize_key(candidate_name):
+        score += 3
+
+    if candidate_set and normalize_key(set_name) == normalize_key(candidate_set):
+        score += 6
+    elif candidate_set and (
+        normalize_key(candidate_set) in normalize_key(set_name)
+        or normalize_key(set_name) in normalize_key(candidate_set)
+    ):
+        score += 2
+
+    if candidate_number and normalize_key(number) == normalize_key(candidate_number):
+        score += 5
+
+    return score
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def map_candidate_to_poketrace(key, card_name, set_name, card_number):
+    query_name = clean_card_name_for_search(card_name)
+    payload = poketrace_search(key, query_name, card_number)
+    cards = payload.get("data", []) or []
+
+    if not cards and card_number:
+        payload = poketrace_search(key, query_name, "")
+        cards = payload.get("data", []) or []
+
+    if not cards:
+        return None
+
+    scored = sorted(
+        [(score_match(query_name, set_name, card_number, c), c) for c in cards],
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    best_score, best = scored[0]
+    if best_score < 3:
+        return None
+    return best
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def poketrace_history(key, card_id, period):
+    api_period = "30d" if period == "14d" else period
+    limit = 30 if api_period == "30d" else 10
+    return poketrace_get(
+        f"/cards/{card_id}/prices/NEAR_MINT/history",
+        key,
+        {"period": api_period, "limit": limit},
+    )
+
+
+def period_history_rows(history_payload, wanted_period):
+    rows = history_payload.get("data", []) or []
+    if wanted_period != "14d":
+        return rows
+
+    dated = []
+    for row in rows:
+        try:
+            d = datetime.strptime(str(row.get("date")), "%Y-%m-%d").date()
+            dated.append((d, row))
+        except Exception:
+            pass
+
+    if not dated:
+        return rows
+
+    max_date = max(d for d, _ in dated)
+    cutoff = max_date - timedelta(days=13)
+    return [row for d, row in dated if d >= cutoff]
+
+
+def summarize_poketrace_card(card, history_rows):
+    prices = card.get("prices") or {}
+    tcg = (prices.get("tcgplayer") or {}).get("NEAR_MINT") or {}
+    ebay = (prices.get("ebay") or {}).get("NEAR_MINT") or {}
+
+    tcg_rows = [r for r in history_rows if str(r.get("source", "")).lower() == "tcgplayer"]
+    ebay_rows = [r for r in history_rows if str(r.get("source", "")).lower() == "ebay"]
+
+    tcg_sold = sum(float(r.get("saleCount") or 0) for r in tcg_rows)
+    ebay_sold = sum(float(r.get("saleCount") or 0) for r in ebay_rows)
+
+    # Prefer rolling average from most recent history row, otherwise current avg.
+    tcg_rows_sorted = sorted(tcg_rows, key=lambda r: str(r.get("date", "")), reverse=True)
+    latest = tcg_rows_sorted[0] if tcg_rows_sorted else {}
+
+    return {
+        "PokeTrace ID": card.get("id"),
+        "Variant": card.get("variant") or "",
+        "TCG NM": tcg.get("avg"),
+        "TCG low": tcg.get("low"),
+        "TCG myyty": int(tcg_sold),
+        "eBay raw myyty": int(ebay_sold),
+        "avg7d": latest.get("avg7d"),
+        "avg30d": latest.get("avg30d"),
+        "Päivitetty": card.get("lastUpdated"),
     }
 
 
-def merge_candidates(top_df, trend_df):
-    if top_df is None or trend_df is None:
+def build_live_sales_scan(candidates, key, period, max_cards):
+    rows = []
+    progress = st.progress(0)
+    status = st.empty()
+
+    subset = candidates.head(max_cards).copy()
+
+    for i, (_, candidate) in enumerate(subset.iterrows(), start=1):
+        status.caption(
+            f"{i}/{len(subset)} • {candidate['Kortti']} • {candidate['Setti']}"
+        )
+
+        try:
+            card = map_candidate_to_poketrace(
+                key,
+                candidate["Kortti"],
+                candidate["Setti"],
+                candidate["Korttinumero"],
+            )
+            if not card:
+                progress.progress(i / len(subset))
+                continue
+
+            history = poketrace_history(key, str(card["id"]), period)
+            history_rows = period_history_rows(history, period)
+            live = summarize_poketrace_card(card, history_rows)
+
+            rows.append(
+                {
+                    "Kortti": candidate["Kortti"],
+                    "Setti": candidate["Setti"],
+                    "Variant": live["Variant"],
+                    f"Myyty {period} TCG": live["TCG myyty"],
+                    f"Myyty {period} eBay": live["eBay raw myyty"],
+                    "TCG NM": live["TCG NM"],
+                    "TCG low": live["TCG low"],
+                    "7d avg": live["avg7d"],
+                    "30d avg": live["avg30d"],
+                    "PokeTrace ID": live["PokeTrace ID"],
+                }
+            )
+        except Exception as exc:
+            # History access is Pro+. Stop immediately on access-plan failure.
+            msg = str(exc)
+            if "403" in msg or "Pro" in msg or "plan" in msg.lower():
+                progress.empty()
+                status.empty()
+                raise RuntimeError(
+                    "PokeTrace history ei ole käytettävissä tällä API-tasolla. "
+                    "7/14/30 päivän tarkat myyntimäärät vaativat PokeTrace Pro -historian."
+                ) from exc
+
+        progress.progress(i / len(subset))
+
+    progress.empty()
+    status.empty()
+
+    if not rows:
         return pd.DataFrame()
 
-    left = top_df.copy()
-    right = trend_df.copy()
-
-    left["_name"] = left["Kortti"].map(normalize_key)
-    left["_set"] = left["Setti"].map(normalize_key)
-    right["_name"] = right["Kortti"].map(normalize_key)
-    right["_set"] = right["Setti"].map(normalize_key)
-
-    # First try exact card + set.
-    merged = left.merge(
-        right,
-        on=["_name", "_set"],
-        how="inner",
-        suffixes=("_sold", "_trend"),
-    )
-
-    if merged.empty:
-        # Fallback to name only if source set naming differs.
-        merged = left.merge(
-            right.drop_duplicates("_name"),
-            on=["_name"],
-            how="inner",
-            suffixes=("_sold", "_trend"),
-        )
-
-    if merged.empty:
-        return merged
-
-    result = pd.DataFrame()
-    result["Kortti"] = merged.get("Kortti_sold", merged.get("Kortti_trend"))
-    result["Setti"] = merged.get("Setti_sold", merged.get("Setti_trend"))
-    result["Keskim. sold-hinta"] = merged.get("Keskim. myyntihinta")
-    result["Myyty kpl"] = merged.get("Myyty kpl")
-    result["Myyntisijoitus"] = merged.get("Raportin sijoitus")
-    result["30d market-hinta"] = merged.get("Nykyinen market-hinta")
-    result["30d muutos $"] = merged.get("Muutos $")
-    result["30d muutos %"] = merged.get("Muutos %")
-    result["Myyty kpl 30d (trend report)"] = merged.get("Myyty kpl 30d")
-
-    # Rank primarily by actual sales count if it exists, otherwise TCG report rank.
-    sold_numeric = pd.to_numeric(result["Myyty kpl"], errors="coerce")
-    rank_numeric = pd.to_numeric(result["Myyntisijoitus"], errors="coerce")
-    change_numeric = pd.to_numeric(result["30d muutos %"], errors="coerce").fillna(0)
-
-    if sold_numeric.notna().any():
-        result["_score_primary"] = sold_numeric.fillna(0)
-        result = result.sort_values(
-            ["_score_primary", "30d muutos %"],
-            ascending=[False, False],
-        )
-    else:
-        result["_score_primary"] = -rank_numeric.fillna(999999)
-        result = result.sort_values(
-            ["Myyntisijoitus", "30d muutos %"],
-            ascending=[True, False],
-        )
-
-    return result.drop(columns=["_score_primary"], errors="ignore").reset_index(drop=True)
+    result = pd.DataFrame(rows)
+    sold_col = f"Myyty {period} TCG"
+    result = result.sort_values(
+        [sold_col, "TCG NM"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
+    return result
 
 
-def get_secret(name):
-    try:
-        return str(st.secrets.get(name, "")).strip()
-    except Exception:
-        return ""
+# ============================================================
+# PRICECHARTING (OPTIONAL)
+# ============================================================
 
-
-def pricecharting_request(path, token, params):
-    if not token:
-        raise ValueError("PriceCharting API token puuttuu.")
-
-    query = {"t": token, **params}
-    response = requests.get(
+def pc_request(path, token, params):
+    r = requests.get(
         f"{PRICECHARTING_BASE}{path}",
-        params=query,
+        params={"t": token, **params},
         timeout=30,
-        headers={"User-Agent": "PokemonCardScanner/0.2"},
+        headers={"User-Agent": "PokemonCardScanner/0.3"},
     )
-    response.raise_for_status()
-    data = response.json()
-
-    if data.get("status") == "error":
-        raise ValueError(data.get("error-message", "PriceCharting API error"))
-
-    return data
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("status") == "error":
+        raise RuntimeError(payload.get("error-message", "PriceCharting API error"))
+    return payload
 
 
-def pc_search(token, query):
-    return pricecharting_request("/api/products", token, {"q": query})
-
-
-def pc_product(token, product_id):
-    return pricecharting_request("/api/product", token, {"id": product_id})
-
-
-def cents_to_dollars(value):
-    try:
-        return float(value) / 100
-    except (TypeError, ValueError):
-        return None
-
-
-# ------------------------------------------------------------
-# HEADER / SIDEBAR
-# ------------------------------------------------------------
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 st.title("Pokémon Card Scanner")
-st.caption("Raw-korttien myynti- ja hintatrendien seulonta.")
+st.caption("Raw / ungraded Pokémon -korttien myynti- ja hintatrendit.")
 
 with st.sidebar:
-    st.header("Yleiset suodattimet")
+    st.subheader("Scanner")
 
     c1, c2 = st.columns(2)
-    min_price = c1.number_input(
-        "Min $", min_value=0.0, value=5.0, step=1.0, key="min_price"
-    )
-    max_price = c2.number_input(
-        "Max $", min_value=0.0, value=20.0, step=1.0, key="max_price"
-    )
+    min_price = c1.number_input("Min $", min_value=0.0, value=5.0, step=1.0)
+    max_price = c2.number_input("Max $", min_value=0.0, value=20.0, step=1.0)
 
-    top_n = st.select_slider(
-        "Näytä",
-        options=[10, 20, 30, 50, 75, 100],
-        value=50,
+    period = st.segmented_control(
+        "Myyntijakso",
+        options=["7d", "14d", "30d"],
+        default="30d",
     )
 
-    if max_price < min_price:
-        st.error("Max-hinnan pitää olla vähintään Min-hinta.")
+    top_n = st.selectbox("Näytä Top", [10, 20, 30, 50], index=3)
 
-    st.divider()
-    st.caption(f"TCGplayer-raporttien jakso: {TCG_PERIOD_LABEL}")
     st.caption(
-        "Top Selling = raw-markkinan kuukausiraportti. "
-        "30d Movers = TCGplayerin Near Mint -hintatrendiraportti."
+        "TCGplayerin kuukausiraporttia käytetään ensin candidate-listana. "
+        "PokeTrace-history antaa varsinaisen 7/14/30d myyntimäärän."
     )
 
     search_clicked = st.button(
-        "🔎 Hae / päivitä kortit",
+        "🔎 Hae kortit",
         type="primary",
         use_container_width=True,
     )
 
+    st.divider()
+    poketrace_key = get_secret("POKETRACE_API_KEY")
+    if poketrace_key:
+        st.success("PokeTrace API-avain käytössä")
+    else:
+        st.warning("PokeTrace API-avain puuttuu")
 
-# ------------------------------------------------------------
-# DATA LOAD
-# ------------------------------------------------------------
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_tcg_data(min_p, max_p):
-    top_raw, top_errors = load_top_selling(
-        min_p, max_p, TCG_TOP_LOW_URL, TCG_TOP_HIGH_URL
-    )
-
-    top_parsed = None
-    top_meta = {}
-    if top_raw is not None:
-        top_parsed, top_meta = parse_top_selling(top_raw)
-
-    trend_raw = None
-    trend_parsed = None
-    trend_meta = {}
-    trend_error = None
-
-    try:
-        trend_raw = fetch_csv(TCG_TRENDS_URL)
-        trend_parsed, trend_meta = parse_price_trends(trend_raw)
-    except Exception as exc:
-        trend_error = str(exc)
-
-    return {
-        "top_raw": top_raw,
-        "top": top_parsed,
-        "top_meta": top_meta,
-        "top_errors": top_errors,
-        "trend_raw": trend_raw,
-        "trend": trend_parsed,
-        "trend_meta": trend_meta,
-        "trend_error": trend_error,
-    }
+    st.caption(f"TCG candidate report: {TCG_PERIOD_LABEL}")
 
 
-EMPTY_DATA = {
-    "top_raw": None,
-    "top": None,
-    "top_meta": {},
-    "top_errors": [],
-    "trend_raw": None,
-    "trend": None,
-    "trend_meta": {},
-    "trend_error": None,
-}
+# ============================================================
+# LOAD CANDIDATES
+# ============================================================
 
 if search_clicked:
     if max_price < min_price:
-        st.sidebar.error("Korjaa hintahaarukka ennen hakua.")
+        st.sidebar.error("Max-hinnan pitää olla vähintään Min-hinta.")
     else:
-        with st.spinner("Haetaan TCGplayerin raportit..."):
-            # Clear fetch cache so "Päivitä" really refreshes remote data.
-            fetch_csv.clear()
-            get_tcg_data.clear()
-            st.session_state["tcg_data"] = get_tcg_data(min_price, max_price)
-            st.session_state["tcg_loaded_range"] = (min_price, max_price)
+        with st.spinner("Haetaan TCGplayer candidate-lista..."):
+            try:
+                st.session_state["candidates"] = load_candidates(min_price, max_price)
+                st.session_state["loaded_range"] = (min_price, max_price)
+            except Exception as exc:
+                st.error(f"TCGplayer-datan haku epäonnistui: {exc}")
 
-data = st.session_state.get("tcg_data", EMPTY_DATA)
+candidates = st.session_state.get("candidates", pd.DataFrame())
 
 
-# ------------------------------------------------------------
+# ============================================================
 # TABS
-# ------------------------------------------------------------
+# ============================================================
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "🔥 Myydyimmät",
-        "📈 30d nousijat",
-        "🎯 Myynti + nousu",
-        "💲 PriceCharting",
-    ]
+tab_scan, tab_movers, tab_pc, tab_status = st.tabs(
+    ["🔥 Myyntiskanneri", "📈 30d nousijat", "💲 PriceCharting", "⚙️ Data"]
 )
 
 
-# ------------------------------------------------------------
-# TAB 1: TOP SELLING
-# ------------------------------------------------------------
+# ============================================================
+# MAIN SALES SCANNER
+# ============================================================
 
-with tab1:
-    st.subheader("TCGplayer – myydyimmät Pokémon-kortit")
-    st.caption(
-        "Toteutuneiden TCGplayer-myyntien kuukausiraportti. "
-        "TCGplayer ei tässä raportissa erottele conditionia tai printtiä."
-    )
+with tab_scan:
+    st.subheader("Myydyimmät raw-kortit")
 
-    for err in data["top_errors"]:
-        st.warning(err)
-
-    top = data["top"]
-
-    if top is None:
-        if "tcg_data" not in st.session_state:
-            st.info("Aseta hintahaarukka vasemmalta ja paina **🔎 Hae / päivitä kortit**.")
-        else:
-            st.error("Top Selling -raporttia ei saatu luettua.")
-            if data["top_meta"]:
-                st.json(data["top_meta"])
+    if candidates.empty:
+        st.info("Valitse hintahaarukka ja paina **🔎 Hae kortit**.")
     else:
-        filtered = top[
-            (top["Keskim. myyntihinta"] >= min_price)
-            & (top["Keskim. myyntihinta"] <= max_price)
-        ].copy()
-
-        sold = pd.to_numeric(filtered["Myyty kpl"], errors="coerce")
-
-        if sold.notna().any():
-            filtered = filtered.sort_values(
-                ["Myyty kpl", "Keskim. myyntihinta"],
-                ascending=[False, True],
-            )
-            rank_basis = "myytyjen kappaleiden mukaan"
-            st.success("Lähdedata sisältää tarkan myytyjen kappaleiden määrän.")
-        else:
-            filtered = filtered.sort_values("Raportin sijoitus")
-            rank_basis = "TCGplayerin raportin myyntisijoituksen mukaan"
-            st.warning(
-                "Tämä TCGplayerin CSV ei sisällä erillistä tarkkaa `Myyty kpl` "
-                "-kenttää. Kortit ovat silti TCGplayerin myyntimäärän mukaisessa "
-                "järjestyksessä, joten näytämme myyntisijoituksen emmekä keksi "
-                "kappalemäärää."
-            )
-
-        filtered = filtered.head(top_n).reset_index(drop=True)
-        filtered.insert(0, "#", range(1, len(filtered) + 1))
-
-        st.write(f"Järjestys: **{rank_basis}**")
-
-        metric1, metric2, metric3 = st.columns(3)
-        metric1.metric("Kortteja", len(filtered))
-        if sold.notna().any():
-            metric2.metric(
-                "Myyty yhteensä",
-                int(pd.to_numeric(filtered["Myyty kpl"], errors="coerce").sum()),
-            )
-        else:
-            metric2.metric("Raportti", "Top Selling")
-        metric3.metric(
-            "Mediaanihinta",
-            (
-                f"${filtered['Keskim. myyntihinta'].median():.2f}"
-                if len(filtered)
-                else "–"
-            ),
-        )
-
-        display_cols = [
-            "#",
-            "Kortti",
-            "Setti",
-            "Keskim. myyntihinta",
-        ]
-        if pd.to_numeric(filtered["Myyty kpl"], errors="coerce").notna().any():
-            display_cols.append("Myyty kpl")
-        display_cols.append("Raportin sijoitus")
-        display_cols = [c for c in display_cols if c in filtered.columns]
-
-        st.dataframe(
-            filtered[display_cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Keskim. myyntihinta": st.column_config.NumberColumn(
-                    "Keskim. myyntihinta", format="$%.2f"
-                ),
-                "Myyty kpl": st.column_config.NumberColumn(
-                    "Myyty kpl", format="%.0f"
-                ),
-                "Raportin sijoitus": st.column_config.NumberColumn(
-                    "TCG-rank", format="%.0f"
-                ),
-            },
-        )
-
-        st.download_button(
-            "Lataa tämä lista CSV:nä",
-            filtered.to_csv(index=False).encode("utf-8-sig"),
-            file_name="tcgplayer_top_sold_filtered.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        st.session_state["latest_top_filtered"] = filtered
-
-
-# ------------------------------------------------------------
-# TAB 2: 30D MOVERS
-# ------------------------------------------------------------
-
-with tab2:
-    st.subheader("TCGplayer – 30 päivän Near Mint -nousijat")
-    st.caption(
-        "TCGplayerin Price Trends -raportti: Near Mint -kortit, joilla "
-        "oli raporttijaksolla vähintään 10 myyntiä."
-    )
-
-    trend = data["trend"]
-
-    if "tcg_data" not in st.session_state:
-        st.info("Paina ensin vasemmalta **🔎 Hae / päivitä kortit**.")
-    elif data["trend_error"]:
-        st.error(f"Price Trends -raportin haku epäonnistui: {data['trend_error']}")
-        st.caption("Raportin CSV-osoitteen voi joutua päivittämään, kun TCGplayer julkaisee uuden kuukauden.")
-    elif trend is None:
-        st.error("Price Trends -CSV saatiin, mutta sarakkeita ei pystytty tunnistamaan.")
-        st.json(data["trend_meta"])
-        if data["trend_raw"] is not None:
-            st.dataframe(data["trend_raw"].head(30), use_container_width=True)
-    else:
-        current_price = pd.to_numeric(
-            trend["Nykyinen market-hinta"], errors="coerce"
-        )
-
-        if current_price.notna().any():
-            trend_filtered = trend[
-                (current_price >= min_price) & (current_price <= max_price)
-            ].copy()
-        else:
-            trend_filtered = trend.copy()
-            st.warning(
-                "Nykyistä market-hintaa ei tunnistettu CSV:stä, joten "
-                "hintasuodatinta ei voitu käyttää tähän näkymään."
-            )
-
-        change_pct = pd.to_numeric(trend_filtered["Muutos %"], errors="coerce")
-        change_dollars = pd.to_numeric(trend_filtered["Muutos $"], errors="coerce")
-
-        if change_pct.notna().any():
-            trend_filtered = trend_filtered.sort_values(
-                "Muutos %", ascending=False
-            )
-        elif change_dollars.notna().any():
-            trend_filtered = trend_filtered.sort_values(
-                "Muutos $", ascending=False
-            )
-
-        trend_filtered = trend_filtered.head(top_n).reset_index(drop=True)
-        trend_filtered.insert(0, "#", range(1, len(trend_filtered) + 1))
-
         m1, m2, m3 = st.columns(3)
-        m1.metric("Kortteja", len(trend_filtered))
+        m1.metric("Candidate-kortteja", len(candidates))
+        m2.metric("Hintahaarukka", f"${min_price:.0f}–${max_price:.0f}")
+        m3.metric("Jakso", period)
 
-        median_change = pd.to_numeric(
-            trend_filtered["Muutos %"], errors="coerce"
-        ).median()
-        m2.metric(
-            "Mediaani 30d muutos",
-            f"{median_change:+.1f}%" if pd.notna(median_change) else "–",
-        )
+        if not poketrace_key:
+            st.warning(
+                "Tarkat 7/14/30d kappalemäärät tarvitsevat PokeTrace-historyn. "
+                "Lisää `POKETRACE_API_KEY` Streamlit Secretsiin."
+            )
 
-        median_price = pd.to_numeric(
-            trend_filtered["Nykyinen market-hinta"], errors="coerce"
-        ).median()
-        m3.metric(
-            "Mediaani market-hinta",
-            f"${median_price:.2f}" if pd.notna(median_price) else "–",
-        )
-
-        display_cols = [
-            c for c in [
-                "#",
-                "Kortti",
-                "Setti",
-                "Hinta jakson alussa",
-                "Nykyinen market-hinta",
-                "Muutos $",
-                "Muutos %",
-                "Myyty kpl 30d",
-            ]
-            if c in trend_filtered.columns
-        ]
-
-        st.dataframe(
-            trend_filtered[display_cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Hinta jakson alussa": st.column_config.NumberColumn(format="$%.2f"),
-                "Nykyinen market-hinta": st.column_config.NumberColumn(format="$%.2f"),
-                "Muutos $": st.column_config.NumberColumn(format="$%+.2f"),
-                "Muutos %": st.column_config.NumberColumn(format="%+.1f%%"),
-                "Myyty kpl 30d": st.column_config.NumberColumn(format="%.0f"),
-            },
-        )
-
-        st.download_button(
-            "Lataa nousijat CSV:nä",
-            trend_filtered.to_csv(index=False).encode("utf-8-sig"),
-            file_name="tcgplayer_30d_movers_filtered.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        with st.expander("CSV-tunnistus / debug"):
-            st.json(data["trend_meta"])
-
-        st.session_state["latest_trend_filtered"] = trend_filtered
-
-
-# ------------------------------------------------------------
-# TAB 3: COMBINED
-# ------------------------------------------------------------
-
-with tab3:
-    st.subheader("Kortit, jotka ovat sekä myytyjä että nousussa")
-    st.caption(
-        "Ristiintaulukoi TCGplayerin Top Selling -raportin ja "
-        "30 päivän Near Mint Price Trends -raportin."
-    )
-
-    top_all = data["top"]
-    trend_all = data["trend"]
-
-    if top_all is None or trend_all is None:
-        st.info("Yhdistelmä tarvitsee molemmat TCGplayer-raportit.")
-    else:
-        # Apply selected price range before merge.
-        top_filtered = top_all[
-            (top_all["Keskim. myyntihinta"] >= min_price)
-            & (top_all["Keskim. myyntihinta"] <= max_price)
-        ].copy()
-
-        trend_price = pd.to_numeric(
-            trend_all["Nykyinen market-hinta"], errors="coerce"
-        )
-        if trend_price.notna().any():
-            trend_filtered_all = trend_all[
-                (trend_price >= min_price) & (trend_price <= max_price)
+            fallback = candidates.head(top_n)[
+                ["Kortti", "Setti", "TCG raporttihinta"]
             ].copy()
-        else:
-            trend_filtered_all = trend_all.copy()
-
-        combined = merge_candidates(top_filtered, trend_filtered_all)
-
-        if combined.empty:
-            st.info(
-                "Tällä hintahaarukalla samoja kortteja ei löytynyt molemmista "
-                "raporteista. Kokeile leveämpää hintahaarukkaa."
-            )
-        else:
-            combined = combined.head(top_n).copy()
-            combined.insert(0, "#", range(1, len(combined) + 1))
-
-            st.success(
-                f"Löytyi {len(combined)} korttia, jotka esiintyvät sekä "
-                "Top Selling- että 30d Price Trends -datassa."
-            )
 
             st.dataframe(
-                combined,
+                fallback,
                 use_container_width=True,
                 hide_index=True,
+                height=min(620, 38 + 31 * len(fallback)),
                 column_config={
-                    "Keskim. sold-hinta": st.column_config.NumberColumn(format="$%.2f"),
-                    "Myyty kpl": st.column_config.NumberColumn(format="%.0f"),
-                    "Myyntisijoitus": st.column_config.NumberColumn(format="%.0f"),
-                    "30d market-hinta": st.column_config.NumberColumn(format="$%.2f"),
-                    "30d muutos $": st.column_config.NumberColumn(format="$%+.2f"),
-                    "30d muutos %": st.column_config.NumberColumn(format="%+.1f%%"),
-                    "Myyty kpl 30d (trend report)": st.column_config.NumberColumn(format="%.0f"),
+                    "TCG raporttihinta": st.column_config.NumberColumn(
+                        "TCG avg", format="$%.2f", width="small"
+                    ),
+                    "Kortti": st.column_config.TextColumn(width="medium"),
+                    "Setti": st.column_config.TextColumn(width="medium"),
                 },
             )
+        else:
+            scan_limit = min(top_n, len(candidates))
 
-            st.download_button(
-                "Lataa yhdistelmä CSV:nä",
-                combined.to_csv(index=False).encode("utf-8-sig"),
-                file_name="tcgplayer_sold_plus_movers.csv",
-                mime="text/csv",
+            st.caption(
+                f"Skannataan enintään {scan_limit} TCGplayerin kuukausiraportin "
+                "vahvinta candidatea ja järjestetään ne PokeTrace-historyn "
+                f"todellisen {period}-myyntimäärän mukaan."
+            )
+
+            if st.button(
+                f"▶ Laske myydyt {period}",
                 use_container_width=True,
-            )
+                type="secondary",
+            ):
+                try:
+                    with st.spinner("Haetaan myyntihistoriaa..."):
+                        result = build_live_sales_scan(
+                            candidates,
+                            poketrace_key,
+                            period,
+                            scan_limit,
+                        )
+                    st.session_state["live_result"] = result
+                    st.session_state["live_period"] = period
+                except Exception as exc:
+                    st.error(str(exc))
 
-            st.session_state["latest_combined"] = combined
+            result = st.session_state.get("live_result", pd.DataFrame())
+
+            if not result.empty:
+                sold_col = f"Myyty {st.session_state.get('live_period', period)} TCG"
+                ebay_col = f"Myyty {st.session_state.get('live_period', period)} eBay"
+
+                metric_a, metric_b, metric_c = st.columns(3)
+                metric_a.metric("Kortteja", len(result))
+                metric_b.metric(
+                    "TCG myyty yhteensä",
+                    f"{int(result[sold_col].sum()):,}".replace(",", " "),
+                )
+                metric_c.metric(
+                    "Top-kortin myynnit",
+                    int(result.iloc[0][sold_col]),
+                )
+
+                display = result[
+                    [
+                        "Kortti",
+                        "Setti",
+                        sold_col,
+                        "TCG NM",
+                        "7d avg",
+                        "30d avg",
+                        ebay_col,
+                        "Variant",
+                    ]
+                ].copy()
+
+                st.dataframe(
+                    display,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(680, 40 + 30 * len(display)),
+                    column_config={
+                        sold_col: st.column_config.NumberColumn(
+                            sold_col.replace(" TCG", ""),
+                            format="%d",
+                            width="small",
+                        ),
+                        ebay_col: st.column_config.NumberColumn(
+                            "eBay raw", format="%d", width="small"
+                        ),
+                        "TCG NM": st.column_config.NumberColumn(
+                            "TCG NM", format="$%.2f", width="small"
+                        ),
+                        "7d avg": st.column_config.NumberColumn(
+                            "7d avg", format="$%.2f", width="small"
+                        ),
+                        "30d avg": st.column_config.NumberColumn(
+                            "30d avg", format="$%.2f", width="small"
+                        ),
+                        "Kortti": st.column_config.TextColumn(width="medium"),
+                        "Setti": st.column_config.TextColumn(width="medium"),
+                        "Variant": st.column_config.TextColumn(width="small"),
+                    },
+                )
+
+                st.download_button(
+                    "Lataa CSV",
+                    result.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"pokemon_raw_sold_{st.session_state.get('live_period', period)}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
 
-# ------------------------------------------------------------
-# TAB 4: PRICECHARTING
-# ------------------------------------------------------------
+# ============================================================
+# MOVERS
+# ============================================================
 
-with tab4:
-    st.subheader("PriceCharting – nykyinen raw-hinta + vuosimyynti")
+with tab_movers:
+    st.subheader("TCGplayer 30d Near Mint -nousijat")
+
+    try:
+        movers = load_price_trends().copy()
+        current = pd.to_numeric(movers["30d nyt"], errors="coerce")
+        movers = movers[
+            (current >= min_price) & (current <= max_price)
+        ].copy()
+        movers = movers.sort_values("30d %", ascending=False).head(top_n)
+
+        compact = movers[
+            ["Kortti", "Setti", "30d alussa", "30d nyt", "30d $", "30d %"]
+        ]
+
+        st.dataframe(
+            compact,
+            use_container_width=True,
+            hide_index=True,
+            height=min(680, 40 + 30 * len(compact)),
+            column_config={
+                "30d alussa": st.column_config.NumberColumn(
+                    "30d ago", format="$%.2f", width="small"
+                ),
+                "30d nyt": st.column_config.NumberColumn(
+                    "Nyt", format="$%.2f", width="small"
+                ),
+                "30d $": st.column_config.NumberColumn(
+                    "Δ $", format="$%+.2f", width="small"
+                ),
+                "30d %": st.column_config.NumberColumn(
+                    "Δ %", format="%+.1f%%", width="small"
+                ),
+                "Kortti": st.column_config.TextColumn(width="medium"),
+                "Setti": st.column_config.TextColumn(width="medium"),
+            },
+        )
+    except Exception as exc:
+        st.error(f"30d movers -dataa ei saatu: {exc}")
+
+
+# ============================================================
+# PRICECHARTING
+# ============================================================
+
+with tab_pc:
+    st.subheader("PriceCharting")
     st.caption(
-        "Valinnainen lisälähde. PriceCharting API vaatii maksullisen "
-        "API-tokenin. Ilman tokenia muu scanneri toimii normaalisti."
+        "Valinnainen toinen raw-hintalähde. Ei käytetä 7/14/30d "
+        "myyntimäärän lähteenä."
     )
 
-    secret_token = get_secret("PRICECHARTING_TOKEN")
-    token = secret_token
+    pc_token = get_secret("PRICECHARTING_TOKEN")
+    if not pc_token:
+        pc_token = st.text_input("PriceCharting token", type="password")
 
-    if secret_token:
-        st.success("PRICECHARTING_TOKEN löytyi Streamlit Secrets -asetuksista.")
-    else:
-        token = st.text_input(
-            "PriceCharting API token",
-            value="",
-            type="password",
-            help="Tokenia ei tallenneta tämän sovelluksen tiedostoihin.",
-        )
-
-    st.info(
-        "PriceChartingin `loose-price` tarkoittaa korteilla ungraded/raw-hintaa. "
-        "`sales-volume` on vuosittainen myyntimäärä, ei 7/30 päivän myyntimäärä."
-    )
-
-    # Offer cards from scanner as quick search seeds.
-    seed_options = []
-
-    if "latest_combined" in st.session_state:
-        for _, row in st.session_state["latest_combined"].iterrows():
-            seed_options.append(
-                f"{row.get('Kortti', '')} | {row.get('Setti', '')}"
-            )
-    elif "latest_top_filtered" in st.session_state:
-        for _, row in st.session_state["latest_top_filtered"].iterrows():
-            seed_options.append(
-                f"{row.get('Kortti', '')} | {row.get('Setti', '')}"
-            )
-
-    query_default = ""
-
-    if seed_options:
-        selected_seed = st.selectbox(
-            "Valitse scannerin kortti hakupohjaksi",
-            ["— kirjoitan haun itse —"] + seed_options,
-        )
-        if selected_seed != "— kirjoitan haun itse —":
-            card_name, set_name = selected_seed.split(" | ", 1)
-            query_default = f"{card_name} {set_name}".strip()
-
-    pc_query = st.text_input(
-        "PriceCharting-haku",
-        value=query_default,
-        placeholder="esim. Charizard 4 Base Set",
-    )
+    pc_query = st.text_input("Korttihaku", placeholder="esim. Charizard 4 Base Set")
 
     if st.button(
         "Hae PriceChartingista",
-        disabled=not bool(token and pc_query.strip()),
-        use_container_width=True,
+        disabled=not bool(pc_token and pc_query.strip()),
     ):
         try:
-            with st.spinner("Haetaan PriceCharting-tuotteita..."):
-                search_data = pc_search(token, pc_query.strip())
-            products = search_data.get("products", [])
-
-            if not products:
-                st.warning("PriceCharting ei löytänyt tuotteita tällä haulla.")
-                st.session_state.pop("pc_products", None)
-            else:
-                st.session_state["pc_products"] = products
+            data = pc_request("/api/products", pc_token, {"q": pc_query.strip()})
+            products = data.get("products", [])
+            st.session_state["pc_products"] = products
         except Exception as exc:
             st.error(str(exc))
 
     products = st.session_state.get("pc_products", [])
-
     if products:
-        labels = []
-        id_by_label = {}
-
-        for product in products:
-            label = (
-                f"{product.get('product-name', 'Unknown')} "
-                f"— {product.get('console-name', '')} "
-                f"[ID {product.get('id', '')}]"
-            )
-            labels.append(label)
-            id_by_label[label] = str(product.get("id"))
-
-        selected_product = st.selectbox(
-            "Valitse oikea kortti",
-            labels,
-        )
-
-        if st.button(
-            "Näytä raw-hinta ja myyntivolyymi",
-            use_container_width=True,
-        ):
-            try:
-                # Respect PriceCharting's 1 request / second API limit.
-                time.sleep(1.05)
-                detail = pc_product(token, id_by_label[selected_product])
-
-                raw_price = cents_to_dollars(detail.get("loose-price"))
-                annual_volume = detail.get("sales-volume")
-                annual_volume_num = None
-                try:
-                    annual_volume_num = int(float(annual_volume))
-                except (TypeError, ValueError):
-                    pass
-
-                p1, p2, p3 = st.columns(3)
-                p1.metric(
-                    "PriceCharting raw",
-                    f"${raw_price:.2f}" if raw_price is not None else "–",
-                )
-                p2.metric(
-                    "Vuosimyynti",
-                    f"{annual_volume_num:,}".replace(",", " ")
-                    if annual_volume_num is not None
-                    else "–",
-                )
-                p3.metric(
-                    "PriceCharting ID",
-                    str(detail.get("id", "–")),
-                )
-
-                st.write(
-                    f"**{detail.get('product-name', '')}**  \n"
-                    f"{detail.get('console-name', '')}"
-                )
-
-                raw_table = {
-                    "Kenttä": [
-                        "Raw / ungraded",
-                        "Yearly sales volume",
-                        "Release date",
-                        "PriceCharting ID",
-                    ],
-                    "Arvo": [
-                        f"${raw_price:.2f}" if raw_price is not None else "–",
-                        annual_volume if annual_volume is not None else "–",
-                        detail.get("release-date", "–"),
-                        detail.get("id", "–"),
-                    ],
+        rows = []
+        for p in products[:20]:
+            rows.append(
+                {
+                    "Nimi": p.get("product-name"),
+                    "Setti": p.get("console-name"),
+                    "ID": p.get("id"),
                 }
-                st.dataframe(
-                    pd.DataFrame(raw_table),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.caption(
-                    "Graded-price-kenttiä ei käytetä tässä raw-scannerissa."
-                )
-
-            except Exception as exc:
-                st.error(str(exc))
-
-    if not token:
-        st.warning(
-            "PriceCharting-osio odottaa API-tokenia. Kun hankit tokenin, "
-            "turvallisin tapa pilvessä on lisätä Streamlit App → Settings → "
-            "Secrets: `PRICECHARTING_TOKEN = \"...\"`."
-        )
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
-# ------------------------------------------------------------
-# FOOTER
-# ------------------------------------------------------------
+# ============================================================
+# DATA STATUS
+# ============================================================
+
+with tab_status:
+    st.subheader("Datalähteet")
+
+    rows = [
+        {
+            "Lähde": "TCGplayer Top Selling",
+            "Käyttö": "Candidate-lista",
+            "Jakso": "Kuukausi",
+            "Tarkka sold count": "Ei julkisessa CSV:ssä",
+        },
+        {
+            "Lähde": "PokeTrace TCGplayer history",
+            "Käyttö": "Raw/NM myyntimäärä",
+            "Jakso": "7 / 14 / 30d",
+            "Tarkka sold count": "Kyllä, history saleCount",
+        },
+        {
+            "Lähde": "PokeTrace eBay",
+            "Käyttö": "Raw sold vertailu",
+            "Jakso": "7 / 14 / 30d",
+            "Tarkka sold count": "Observed / eBay voi olla approximate",
+        },
+        {
+            "Lähde": "PriceCharting",
+            "Käyttö": "Raw nykyhinta + likviditeetti",
+            "Jakso": "Nykyinen / vuosivolyymi",
+            "Tarkka sold count": "Ei 7/30d",
+        },
+    ]
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if poketrace_key:
+        try:
+            info = poketrace_auth_info(poketrace_key)
+            user = (info.get("data") or {}).get("user") or {}
+            st.write(
+                f"**PokeTrace plan:** {user.get('plan', 'Unknown')}  \n"
+                f"**Remaining:** {user.get('remaining', '–')} / {user.get('limit', '–')}"
+            )
+        except Exception as exc:
+            st.warning(f"PokeTrace auth-info ei onnistunut: {exc}")
+
+    st.code(
+        'POKETRACE_API_KEY = "oma_avain"\n'
+        'PRICECHARTING_TOKEN = "oma_token"',
+        language="toml",
+    )
+    st.caption("Lisää avaimet Streamlit → App settings → Secrets. Älä committaa niitä GitHubiin.")
+
 
 st.divider()
 st.caption(
-    "v0.2.2 • Raw trend scanner. RareBit/Cardmarket lisätään myöhemmin erillisenä "
-    "EU-datalähteenä. PSA/graded-dataa ei käytetä pääscannerissa."
+    "v0.3 • Raw only • TCG rank ei ole enää päämittari. "
+    "Tavoite: todelliset 7/14/30d myyntimäärät."
 )
