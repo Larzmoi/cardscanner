@@ -175,10 +175,17 @@ def parse_top_selling(df):
         cols,
         [
             "copies sold",
+            "total copies sold",
             "units sold",
             "quantity sold",
-            "total sold",
+            "total quantity sold",
+            "total quantity",
             "sold quantity",
+            "qty sold",
+            "qty",
+            "quantity",
+            "number sold",
+            "copies",
             "sales volume",
             "sales",
             "sold",
@@ -226,28 +233,49 @@ def parse_price_trends(df):
     set_col = detect_column(
         cols, ["set name", "set", "expansion", "group name"]
     )
+
+    # IMPORTANT:
+    # Detect the OLD price before the current price. TCGplayer's CSV may contain
+    # a column such as "Market Price 30 Days Ago"; a generic "market price"
+    # matcher must never mistake that for the current price.
+    old_col = detect_column(
+        cols,
+        [
+            "market price 30 days ago",
+            "market price 30d ago",
+            "starting market price",
+            "previous market price",
+            "old market price",
+            "starting price",
+            "previous price",
+        ],
+    )
+
     current_col = detect_column(
         cols,
         [
             "current market price",
+            "market price today",
+            "market price now",
             "new market price",
             "ending market price",
             "current price",
-            "market price",
         ],
     )
+
     increase_col = detect_column(
         cols,
         [
             "price increase",
-            "increase",
             "market price increase",
             "dollar increase",
             "change amount",
             "price change",
+            "increase",
             "change",
         ],
     )
+
     percent_col = detect_column(
         cols,
         [
@@ -259,26 +287,22 @@ def parse_price_trends(df):
             "% change",
         ],
     )
-    old_col = detect_column(
-        cols,
-        [
-            "starting market price",
-            "previous market price",
-            "old market price",
-            "market price 30 days ago",
-            "starting price",
-            "previous price",
-        ],
-    )
+
     sales_col = detect_column(
         cols,
         [
             "copies sold",
+            "total copies sold",
             "units sold",
+            "quantity sold",
+            "total quantity sold",
+            "total quantity",
+            "qty sold",
+            "qty",
+            "quantity",
             "sales",
             "sale count",
             "sales count",
-            "quantity sold",
         ],
     )
 
@@ -289,48 +313,63 @@ def parse_price_trends(df):
     out["Kortti"] = df[name_col].astype(str)
     out["Setti"] = df[set_col].astype(str) if set_col else ""
 
-    if current_col:
-        out["Nykyinen market-hinta"] = money_to_float(df[current_col])
-    else:
-        out["Nykyinen market-hinta"] = pd.NA
+    old = money_to_float(df[old_col]) if old_col else pd.Series(pd.NA, index=df.index, dtype="Float64")
+    change = money_to_float(df[increase_col]) if increase_col else pd.Series(pd.NA, index=df.index, dtype="Float64")
+    current = money_to_float(df[current_col]) if current_col else pd.Series(pd.NA, index=df.index, dtype="Float64")
 
-    if increase_col:
-        out["Muutos $"] = money_to_float(df[increase_col])
-    else:
-        out["Muutos $"] = pd.NA
+    # Safety check: if the same source column was accidentally selected for
+    # both old and current, discard "current" and derive it instead.
+    if old_col and current_col and old_col == current_col:
+        current = pd.Series(pd.NA, index=df.index, dtype="Float64")
+        current_col = None
 
-    if old_col:
-        out["Hinta jakson alussa"] = money_to_float(df[old_col])
-    else:
-        out["Hinta jakson alussa"] = pd.NA
+    # Derive missing values using the identity:
+    # current = old + change
+    old_num = pd.to_numeric(old, errors="coerce")
+    change_num = pd.to_numeric(change, errors="coerce")
+    current_num = pd.to_numeric(current, errors="coerce")
+
+    derived_current = old_num + change_num
+    current_num = current_num.fillna(derived_current)
+
+    derived_old = current_num - change_num
+    old_num = old_num.fillna(derived_old)
+
+    # If change itself is missing but both prices exist, derive it.
+    derived_change = current_num - old_num
+    change_num = change_num.fillna(derived_change)
 
     if percent_col:
         pct = money_to_float(df[percent_col])
-        # If values look like fractions (0.25), convert to percentage points.
-        valid = pct.dropna()
+        valid = pd.to_numeric(pct, errors="coerce").dropna()
         if len(valid) and valid.abs().median() <= 2:
             pct = pct * 100
-        out["Muutos %"] = pct
+        pct_num = pd.to_numeric(pct, errors="coerce")
     else:
-        out["Muutos %"] = pd.NA
+        pct_num = pd.Series(pd.NA, index=df.index, dtype="Float64")
+
+    # Always derive % from the actual old/current prices when the source value
+    # is absent. This prevents nonsense such as negative starting prices.
+    derived_pct = (change_num / old_num.replace(0, pd.NA)) * 100
+    pct_num = pct_num.fillna(derived_pct)
+
+    out["Hinta jakson alussa"] = old_num
+    out["Nykyinen market-hinta"] = current_num
+    out["Muutos $"] = change_num
+    out["Muutos %"] = pct_num
 
     if sales_col:
         out["Myyty kpl 30d"] = numeric_to_float(df[sales_col])
     else:
         out["Myyty kpl 30d"] = pd.NA
 
-    # Derive missing starting price / percent change when possible.
-    current = pd.to_numeric(out["Nykyinen market-hinta"], errors="coerce")
-    change = pd.to_numeric(out["Muutos $"], errors="coerce")
-    old = pd.to_numeric(out["Hinta jakson alussa"], errors="coerce")
-    pct = pd.to_numeric(out["Muutos %"], errors="coerce")
-
-    derived_old = current - change
-    out["Hinta jakson alussa"] = old.fillna(derived_old)
-
-    old2 = pd.to_numeric(out["Hinta jakson alussa"], errors="coerce")
-    derived_pct = (change / old2.replace(0, pd.NA)) * 100
-    out["Muutos %"] = pct.fillna(derived_pct)
+    # Reject impossible derived rows instead of displaying corrupt math.
+    invalid = (
+        (pd.to_numeric(out["Hinta jakson alussa"], errors="coerce") < 0)
+        | (pd.to_numeric(out["Nykyinen market-hinta"], errors="coerce") < 0)
+    )
+    if invalid.any():
+        out.loc[invalid, ["Hinta jakson alussa", "Nykyinen market-hinta", "Muutos $", "Muutos %"]] = pd.NA
 
     out = out.reset_index(drop=True)
 
@@ -484,6 +523,12 @@ with st.sidebar:
         "30d Movers = TCGplayerin Near Mint -hintatrendiraportti."
     )
 
+    search_clicked = st.button(
+        "🔎 Hae / päivitä kortit",
+        type="primary",
+        use_container_width=True,
+    )
+
 
 # ------------------------------------------------------------
 # DATA LOAD
@@ -523,7 +568,29 @@ def get_tcg_data(min_p, max_p):
     }
 
 
-data = get_tcg_data(min_price, max_price)
+EMPTY_DATA = {
+    "top_raw": None,
+    "top": None,
+    "top_meta": {},
+    "top_errors": [],
+    "trend_raw": None,
+    "trend": None,
+    "trend_meta": {},
+    "trend_error": None,
+}
+
+if search_clicked:
+    if max_price < min_price:
+        st.sidebar.error("Korjaa hintahaarukka ennen hakua.")
+    else:
+        with st.spinner("Haetaan TCGplayerin raportit..."):
+            # Clear fetch cache so "Päivitä" really refreshes remote data.
+            fetch_csv.clear()
+            get_tcg_data.clear()
+            st.session_state["tcg_data"] = get_tcg_data(min_price, max_price)
+            st.session_state["tcg_loaded_range"] = (min_price, max_price)
+
+data = st.session_state.get("tcg_data", EMPTY_DATA)
 
 
 # ------------------------------------------------------------
@@ -557,9 +624,12 @@ with tab1:
     top = data["top"]
 
     if top is None:
-        st.error("Top Selling -raporttia ei saatu luettua.")
-        if data["top_meta"]:
-            st.json(data["top_meta"])
+        if "tcg_data" not in st.session_state:
+            st.info("Aseta hintahaarukka vasemmalta ja paina **🔎 Hae / päivitä kortit**.")
+        else:
+            st.error("Top Selling -raporttia ei saatu luettua.")
+            if data["top_meta"]:
+                st.json(data["top_meta"])
     else:
         filtered = top[
             (top["Keskim. myyntihinta"] >= min_price)
@@ -574,13 +644,15 @@ with tab1:
                 ascending=[False, True],
             )
             rank_basis = "myytyjen kappaleiden mukaan"
+            st.success("Lähdedata sisältää tarkan myytyjen kappaleiden määrän.")
         else:
             filtered = filtered.sort_values("Raportin sijoitus")
-            rank_basis = "TCGplayerin raportin sijoituksen mukaan"
-            st.info(
-                "Tässä CSV-versiossa ei ole erillistä myytyjen kappaleiden "
-                "lukua, joten järjestys perustuu TCGplayerin valmiiseen "
-                "myyntivolyymirankingiin."
+            rank_basis = "TCGplayerin raportin myyntisijoituksen mukaan"
+            st.warning(
+                "Tämä TCGplayerin CSV ei sisällä erillistä tarkkaa `Myyty kpl` "
+                "-kenttää. Kortit ovat silti TCGplayerin myyntimäärän mukaisessa "
+                "järjestyksessä, joten näytämme myyntisijoituksen emmekä keksi "
+                "kappalemäärää."
             )
 
         filtered = filtered.head(top_n).reset_index(drop=True)
@@ -607,16 +679,15 @@ with tab1:
         )
 
         display_cols = [
-            c for c in [
-                "#",
-                "Kortti",
-                "Setti",
-                "Keskim. myyntihinta",
-                "Myyty kpl",
-                "Raportin sijoitus",
-            ]
-            if c in filtered.columns
+            "#",
+            "Kortti",
+            "Setti",
+            "Keskim. myyntihinta",
         ]
+        if pd.to_numeric(filtered["Myyty kpl"], errors="coerce").notna().any():
+            display_cols.append("Myyty kpl")
+        display_cols.append("Raportin sijoitus")
+        display_cols = [c for c in display_cols if c in filtered.columns]
 
         st.dataframe(
             filtered[display_cols],
@@ -659,7 +730,9 @@ with tab2:
 
     trend = data["trend"]
 
-    if data["trend_error"]:
+    if "tcg_data" not in st.session_state:
+        st.info("Paina ensin vasemmalta **🔎 Hae / päivitä kortit**.")
+    elif data["trend_error"]:
         st.error(f"Price Trends -raportin haku epäonnistui: {data['trend_error']}")
         st.caption("Raportin CSV-osoitteen voi joutua päivittämään, kun TCGplayer julkaisee uuden kuukauden.")
     elif trend is None:
@@ -1010,6 +1083,6 @@ with tab4:
 
 st.divider()
 st.caption(
-    "v0.2 • Raw trend scanner. RareBit/Cardmarket lisätään myöhemmin erillisenä "
+    "v0.2.2 • Raw trend scanner. RareBit/Cardmarket lisätään myöhemmin erillisenä "
     "EU-datalähteenä. PSA/graded-dataa ei käytetä pääscannerissa."
 )
