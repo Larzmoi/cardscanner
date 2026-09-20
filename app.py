@@ -28,39 +28,44 @@ st.markdown(
     """
     <style>
       @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
-      :root { --ink: #202735; --muted: #687181; --accent: #b86b35; --accent-soft: #f3e3d5; --paper: #f7f5f1; --panel: #fffdfa; }
+      :root { --ink: #e8edf2; --muted: #9aa7b4; --accent: #d49a5b; --accent-soft: #2c231c; --paper: #0b1117; --panel: #141c25; --panel-raised: #1a2530; }
       html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: var(--ink); }
       [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] * { color: var(--ink); }
       h1, h2, h3, [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.035em; color: var(--ink) !important; }
-      [data-testid="stAppViewContainer"] { background: radial-gradient(circle at 86% 0%, #eee5da 0, transparent 34rem), var(--paper); }
+      [data-testid="stAppViewContainer"] { background: radial-gradient(circle at 78% -10%, #1f2a35 0, transparent 32rem), var(--paper); }
       .block-container {
         padding-top: 2.5rem;
         padding-bottom: 4rem;
         max-width: 1420px;
       }
-      [data-testid="stMetric"] { background: rgba(255,253,250,.9); border-radius: 1.2rem; padding: .9rem 1rem; box-shadow: 0 12px 32px rgba(38,43,54,.07); }
+      [data-testid="stMetric"] { background: var(--panel); border: 1px solid #263442; border-radius: 1rem; padding: .9rem 1rem; box-shadow: 0 18px 40px rgba(0,0,0,.18); }
       [data-testid="stMetricLabel"], [data-testid="stCaptionContainer"] { color: var(--muted) !important; }
-      [data-testid="stMetricValue"] { font-family: 'Space Grotesk', sans-serif; font-size: 1.5rem; color: var(--ink) !important; }
-      div[data-testid="stDataFrame"] { font-size: .82rem; border-radius: 1.2rem; overflow: hidden; }
+      [data-testid="stMetricValue"] { font-family: 'Space Grotesk', sans-serif; font-size: 1.5rem; color: var(--ink) !important; font-variant-numeric: tabular-nums; }
+      div[data-testid="stDataFrame"] { font-size: .82rem; border: 1px solid #263442; border-radius: 1rem; overflow: hidden; }
       .stTabs [data-baseweb="tab"] {
         padding: .65rem 1rem;
         font-weight: 600;
       }
       .stTabs [data-baseweb="tab"] p, .stTabs [data-baseweb="tab"] div { color: var(--muted) !important; }
       .stTabs [aria-selected="true"] p, .stTabs [aria-selected="true"] div { color: var(--accent) !important; }
-      .stButton > button { border-radius: 999px; min-height: 2.7rem; font-weight: 600; transition: transform .35s cubic-bezier(.32,.72,0,1), box-shadow .35s cubic-bezier(.32,.72,0,1); }
-      .stButton > button[kind="primary"] { background: var(--accent); border-color: var(--accent); color: #fffdfa; }
-      .stButton > button[kind="primary"]:hover { background: #9f592b; border-color: #9f592b; }
-      .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(184,107,53,.16); }
-      [data-testid="stSidebar"] { background: rgba(255,253,250,.96); }
+      .stTabs [data-baseweb="tab-highlight"] { background: var(--accent); }
+      .stButton > button { border-radius: .75rem; min-height: 2.7rem; font-weight: 600; transition: transform .3s cubic-bezier(.32,.72,0,1), box-shadow .3s cubic-bezier(.32,.72,0,1); background: var(--panel-raised); border: 1px solid #30404f; color: var(--ink); }
+      .stButton > button[kind="primary"] { background: var(--accent); border-color: var(--accent); color: #17120e; }
+      .stButton > button[kind="primary"]:hover { background: #e1ab70; border-color: #e1ab70; }
+      .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(0,0,0,.22); }
+      [data-testid="stSidebar"] { background: #101820; border-right: 1px solid #263442; }
       [data-testid="stSidebar"] label, [data-testid="stSidebar"] label p, [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--ink) !important; }
-      [data-testid="stSidebar"] input, [data-testid="stSidebar"] [role="combobox"] { color: var(--ink) !important; background: var(--panel) !important; }
+      [data-testid="stSidebar"] input, [data-testid="stSidebar"] [role="combobox"] { color: var(--ink) !important; background: var(--panel) !important; border-color: #30404f !important; }
+      [data-testid="stAlert"] { background: var(--panel) !important; border: 1px solid #30404f; }
       [data-testid="stAlert"] p, [data-testid="stAlert"] span { color: var(--ink) !important; }
       .eyebrow { color: var(--accent) !important; font-size: .72rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; margin-bottom: .4rem; }
-      .hero { background: linear-gradient(135deg, rgba(255,253,250,.96), rgba(243,227,213,.86)); border-radius: 2rem; padding: 2rem 2.2rem; margin-bottom: 1.4rem; box-shadow: 0 18px 50px rgba(38,43,54,.08); }
+      .hero { background: linear-gradient(135deg, #17212b, #111921); border: 1px solid #2b3a48; border-radius: 1.5rem; padding: 2rem 2.2rem; margin-bottom: 1.4rem; box-shadow: 0 24px 55px rgba(0,0,0,.22); }
       .hero h1 { color: var(--ink) !important; }
       .hero p { color: var(--muted) !important; max-width: 48rem; margin-bottom: 0; }
-      .callout { background: rgba(255,253,250,.96); border-left: 4px solid var(--accent); border-radius: 1rem; padding: 1rem 1.1rem; color: var(--muted) !important; }
+      .callout { background: var(--panel); border: 1px solid #30404f; border-left: 4px solid var(--accent); border-radius: .9rem; padding: 1rem 1.1rem; color: var(--muted) !important; }
+      [data-testid="stSelectbox"] [data-baseweb="select"] > div, [data-testid="stNumberInput"] input { background: var(--panel) !important; color: var(--ink) !important; border-color: #30404f !important; }
+      [data-testid="stSelectbox"] svg { fill: var(--muted) !important; }
+      hr { border-color: #263442 !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -236,11 +241,29 @@ def parse_us_card(card):
         "7d vs 30d %": pct_change(tcg_avg7, tcg_avg30),
         "1d vs 7d %": pct_change(tcg_avg1, tcg_avg7),
         "eBay NM": safe_num(ebay.get("avg")),
+        "eBay low": safe_num(ebay.get("low")),
         "eBay sales hist.": int(ebay.get("saleCount") or 0),
         "eBay approx": bool(ebay.get("approxSaleCount", True)),
         "TCGplayer ID": refs.get("tcgplayerId"),
         "Last updated": card.get("lastUpdated"),
     }
+
+
+def add_market_comparison(df):
+    """Add transparent cross-source price fields for the manual EU handoff."""
+    if df.empty:
+        return df
+
+    work = df.copy()
+    tcg = pd.to_numeric(work.get("TCG NM"), errors="coerce")
+    ebay = pd.to_numeric(work.get("eBay NM"), errors="coerce")
+    work["Price sources"] = (
+        tcg.notna().astype(int) + ebay.notna().astype(int)
+    ).map({0: "Ei hintaa", 1: "1 lähde", 2: "2 lähdettä"})
+    work["US reference"] = pd.concat([tcg, ebay], axis=1).median(axis=1, skipna=True)
+    work["TCG vs eBay %"] = ((tcg - ebay) / ebay.replace(0, pd.NA) * 100).round(1)
+    work["TCG below eBay"] = (tcg < ebay).where(tcg.notna() & ebay.notna())
+    return work
 
 
 def card_matches_price(row, min_price, max_price):
@@ -757,8 +780,8 @@ st.markdown(
     """
     <section class="hero">
       <div class="eyebrow">Market intelligence · raw only</div>
-      <h1>US → EU opportunity scanner</h1>
-      <p>Seulo ensin 5–20 dollarin likvidit kortit, vahvista TCGplayerin toteutunut 30 päivän liike ja tarkista vasta sen jälkeen, onko Eurooppa vielä jäljessä.</p>
+      <h1>US market signal scanner</h1>
+      <p>Vertaa USA:n TCGplayer- ja eBay-hintoja, vahvista 30 päivän myyntiliike ja vie parhaat 50 korttia käsin tehtävään EU-tarkistukseen.</p>
     </section>
     """,
     unsafe_allow_html=True,
@@ -822,11 +845,18 @@ with st.sidebar:
         ),
     )
 
-    show_top = st.selectbox("Näytä tuloksia", [20, 50, 100], index=0)
+    min_30d_sales = st.number_input(
+        "Min. TCGplayer-myynti / 30d",
+        min_value=0,
+        value=50,
+        step=10,
+        help="Käytetään vasta, kun oikea päiväkohtainen TCGplayer-historia on haettu.",
+    )
+    show_top = st.selectbox("Näytä tuloksia", [20, 50, 100], index=1)
 
     st.info(
-        "Budjetti on USA-dollareissa, koska TCGplayer/PokeTrace ei tarjoa tässä näkymässä luotettavaa EUR-muunnosta. "
-        "EU-arbitraasi vaatii erillisen Cardmarket- tai RareBit-lähteen."
+        "USA-seulonta käyttää TCGplayer Near Mint -hintaa ja näyttää eBay-hinnan "
+        "ristiinvertailuna. EU-hinta tarkistetaan käsin ladatusta Top 50 -listasta."
     )
 
     st.divider()
@@ -841,7 +871,7 @@ tab_scan, tab_history, tab_pc, tab_keys = st.tabs(
     [
         "01 · Löydä signaali",
         "02 · Vahvista 30d",
-        "03 · Cross-check",
+        "03 · Hintavertailu",
         "04 · Datalähteet",
     ]
 )
@@ -854,9 +884,9 @@ tab_scan, tab_history, tab_pc, tab_keys = st.tabs(
 with tab_scan:
     st.subheader("Löydä USA:n varhainen kysyntä")
     st.markdown(
-        '<div class="callout"><strong>Työvaihe 1:</strong> skannaa kortit hintaluokasta. '
-        'Tämä löytää ehdokkaat, ei vielä todista arbitraasia. Paina sen jälkeen '
-        '<strong>Vahvista TCGplayer 30d</strong>, jotta ranking perustuu toteutuneisiin myynteihin.</div>',
+        '<div class="callout"><strong>Työvaihe 1:</strong> skannaa USA:n kortit. '
+        'TCGplayer on päävertailu; eBay toimii toisena hintalähteenä. '
+        'Vahvista sen jälkeen TCGplayerin oikea 30 päivän myyntimäärä.</div>',
         unsafe_allow_html=True,
     )
     pt_key = provider_key("PokeTrace")
@@ -1009,7 +1039,20 @@ with tab_scan:
                     "Ranking käyttää nyt toteutunutta TCGplayer 30d -myyntiä. "
                     "EU-hinta ei ole vielä mukana, joten tämä ei yksin ole arbitraasisignaali."
                 )
-            ranked = build_signal_table(pool)
+            ranked = add_market_comparison(build_signal_table(pool))
+            if "Myyty 30d TCG" in ranked.columns:
+                verified_sales = pd.to_numeric(
+                    ranked["Myyty 30d TCG"], errors="coerce"
+                )
+                ranked["30d sales pass"] = verified_sales >= min_30d_sales
+                ranked = ranked[ranked["30d sales pass"]].copy()
+                if ranked.empty:
+                    st.warning(
+                        f"Yksikään vahvistettu ehdokas ei täyttänyt vähintään "
+                        f"{min_30d_sales} TCGplayer-myyntiä / 30 päivää."
+                    )
+            else:
+                ranked["30d sales pass"] = pd.NA
             ranked = ranked.head(show_top).reset_index(drop=True)
 
             display_columns = [
@@ -1018,6 +1061,10 @@ with tab_scan:
                 "Numero",
                 "Variant",
                 "TCG NM",
+                "eBay NM",
+                "US reference",
+                "TCG vs eBay %",
+                "Price sources",
                 "Signal",
                 "Signal score",
                 "TCG 30d data",
@@ -1059,6 +1106,18 @@ with tab_scan:
                     "TCG NM": st.column_config.NumberColumn(
                         "TCG NM", format="$%.2f", width="small"
                     ),
+                    "eBay NM": st.column_config.NumberColumn(
+                        "eBay NM", format="$%.2f", width="small"
+                    ),
+                    "US reference": st.column_config.NumberColumn(
+                        "US ref.", format="$%.2f", width="small"
+                    ),
+                    "TCG vs eBay %": st.column_config.NumberColumn(
+                        "TCG/eBay Δ", format="%+.1f%%", width="small"
+                    ),
+                    "Price sources": st.column_config.TextColumn(
+                        "Hintalähteet", width="small"
+                    ),
                     "TCG sales hist.": st.column_config.NumberColumn(
                         "TCG sales", format="%d", width="small"
                     ),
@@ -1077,19 +1136,20 @@ with tab_scan:
                 },
             )
 
+            eu_review = ranked.head(50).copy()
             st.download_button(
-                "Lataa rankattu CSV",
-                ranked.to_csv(index=False).encode("utf-8-sig"),
-                file_name="pokemon_us_eu_opportunity_candidates.csv",
+                "Lataa Top 50 EU-manuaalilistaksi",
+                eu_review.to_csv(index=False).encode("utf-8-sig"),
+                file_name="pokemon_top50_us_candidates_for_eu_review.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
-            st.markdown("#### Mitä tästä puuttuu ennen ostopäätöstä?")
+            st.markdown("#### EU-manuaalitarkistus")
             st.info(
-                "USA-signaali on nyt mitattavissa: toteutunut 30d-myynti, 7d/30d-hintamomentum ja likviditeetti. "
-                "EU-arbitraasi vaatii vastaavan English/Near Mint/raw-sarjan Cardmarketista tai RareBitistä. "
-                "Sitä ei voi päätellä PriceChartingin loose-price-arvosta."
+                "Avaa ladattu CSV ja tarkista enintään 50 korttia Cardmarketista käsin. "
+                "Kirjaa jokaiselle EU-hinta, aktiivisten NM-listausten määrä, kieli, printti "
+                "ja toimituskulut. USA-hintaeroa ei pidä tulkita voitoksi ennen näitä tarkistuksia."
             )
 
 
@@ -1227,7 +1287,7 @@ with tab_history:
 with tab_pc:
     pc_token = provider_key("PriceCharting")
 
-    st.subheader("Cross-check: USA-signaali → EU-validointi")
+    st.subheader("USA-hintojen ristiinvertailu")
     st.markdown(
         '<div class="callout"><strong>Arbitraasi ei ole todistettu</strong>, ennen kuin sama '
         'kortti, printti, kieli ja Near Mint -kunto löytyy EU-lähteestä. PriceCharting toimii '

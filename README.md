@@ -1,69 +1,23 @@
-# Pokémon Card Scanner v0.2
+# Pokémon Trend Scanner v0.5 RESET
 
-Selainpohjainen raw Pokémon -korttien trendiskanneri.
+Tämä versio palauttaa alkuperäisen tavoitteen.
 
-## v0.2
+- vain English Pokémon singles
+- raw / Near Mint
+- alle $1 pois
+- Energy-kortit pois oletuksena
+- historiallista saleCountia ei käytetä trendin päämittarina
+- vaaditaan positiivinen 7d vs 30d hintamomentum
+- lyhyen aikavälin voimakas pudotus hylätään
+- Free PokeTrace käyttää saleCountia vain likviditeetin vahvistuksena
+- Pro+ history laskee Myyty 7d / 14d / 30d ja sales accelerationin
 
-Uutta:
+## Päivitys
 
-- TCGplayer Top Selling -näkymä
-- hintahaarukka
-- Top 10 / 20 / 30 / 50 / 75 / 100
-- TCGplayer 30 päivän Near Mint Price Trends -näkymä
-- yhdistelmänäkymä: kortit, jotka ovat sekä Top Selling- että 30d-nousijoissa
-- PriceCharting API -integraatio:
-  - raw / ungraded nykyhinta (`loose-price`)
-  - vuosittainen myyntivolyymi (`sales-volume`)
-- PriceCharting ei ole pakollinen; muu appi toimii ilman tokenia
-- raw only -periaate säilytetty
-- RareBit/Cardmarket jätetty seuraavaan vaiheeseen
-
-## TCGplayerin datan rajoitukset
-
-Top Selling -kuukausiraportti:
-- toteutunut myyntivolyymi / ranking
-- ei erottele conditionia
-- ei erottele printing-versioita
-
-Price Trends -raportti:
-- Near Mint
-- vähintään 10 myyntiä raporttijaksolla
-- noin 30 päivän hinnanmuutos
-- ei ole jatkuva live-API
-
-## PriceCharting
-
-PriceCharting API on valinnainen ja vaatii oman API-tokenin.
-
-Korttien kannalta:
-- `loose-price` = raw / ungraded
-- `sales-volume` = yearly units sold
-
-PriceCharting ei anna tässä API:ssa historiallista 7/30 päivän myyntidataa.
-
-### Streamlit Secrets
-
-Pilvessä token kannattaa lisätä:
-
-App → Settings → Secrets
-
-```toml
-PRICECHARTING_TOKEN = "OMA_TOKEN"
-```
-
-Älä committaa API-tokenia GitHubiin.
-
-## Päivitys GitHubiin
-
-Korvaa vanha `app.py` tällä v0.2-versiolla ja varmista, että
-`requirements.txt` on mukana.
-
-Sen jälkeen:
+Korvaa `app.py` ja `requirements.txt`, sitten:
 
 ```powershell
-git add .
-git commit -m "Update scanner to v0.2"
+git add app.py requirements.txt
+git commit -m "Reset scanner to growth candidates"
 git push
 ```
-
-Streamlit Community Cloud päivittää sovelluksen GitHubista automaattisesti.
