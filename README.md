@@ -2,6 +2,25 @@
 
 Selainpohjainen raw Pokémon -korttien trendiskanneri.
 
+## Nykyinen käyttötapaus: US → EU -arbitraasin esiseulonta
+
+Sovelluksen tärkein työnkulku on nyt kaksivaiheinen:
+
+1. **Seulonta:** etsi USA:n TCGplayer/Near Mint -markkinasta esimerkiksi
+   5–20 dollarin kortit, joilla on likviditeettiä ja hintamomentumia.
+2. **Vahvistus:** hae ehdokkaille PokeTrace-historian päiväkohtaiset rivit ja
+   laske oikea TCGplayerin toteutunut 30 päivän myyntimäärä.
+
+`TCG sales hist.` on vain kumulatiivinen seulontaproxy. Sitä ei saa tulkita
+30 päivän myynneiksi. Oikea 30d-luku näkyy vasta, kun **Vahvista TCGplayer
+30d** on ajettu PokeTrace Pro+ -historialla.
+
+EU-arbitraasi edellyttää vielä saman kortin, printin, kielen ja Near Mint
+raw -kunnon Cardmarket- tai RareBit-dataa. PriceChartingin `loose-price` ja
+`sales-volume` ovat tukevia ristiinvertailuja, eivät EU-hinnan korvikkeita.
+Sovellus näyttää tämän puuttuvan validointikerroksen eksplisiittisesti eikä
+valmista keinotekoista EU-signaalia.
+
 ## v0.2
 
 Uutta:

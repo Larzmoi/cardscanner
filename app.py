@@ -27,20 +27,33 @@ HARD_MIN_RAW_PRICE = 1.00
 st.markdown(
     """
     <style>
+      @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+      :root { --ink: #202735; --muted: #687181; --accent: #b86b35; --accent-soft: #f3e3d5; --paper: #f7f5f1; --panel: #fffdfa; }
+      html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+      h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.035em; color: var(--ink); }
+      [data-testid="stAppViewContainer"] { background: radial-gradient(circle at 86% 0%, #eee5da 0, transparent 34rem), var(--paper); }
       .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1.2rem;
-        max-width: 1500px;
+        padding-top: 2.5rem;
+        padding-bottom: 4rem;
+        max-width: 1420px;
       }
-      h1 { margin-bottom: .1rem; }
-      h2, h3 { margin-top: .6rem; }
-      [data-testid="stMetric"] { padding: .25rem .5rem; }
-      [data-testid="stMetricValue"] { font-size: 1.35rem; }
-      div[data-testid="stDataFrame"] { font-size: .80rem; }
+      [data-testid="stMetric"] { background: rgba(255,253,250,.9); border-radius: 1.2rem; padding: .9rem 1rem; box-shadow: 0 12px 32px rgba(38,43,54,.07); }
+      [data-testid="stMetricLabel"] { color: var(--muted); }
+      [data-testid="stMetricValue"] { font-family: 'Space Grotesk', sans-serif; font-size: 1.5rem; }
+      div[data-testid="stDataFrame"] { font-size: .82rem; border-radius: 1.2rem; overflow: hidden; }
       .stTabs [data-baseweb="tab"] {
-        padding-top: .35rem;
-        padding-bottom: .35rem;
+        padding: .65rem 1rem;
+        font-weight: 600;
       }
+      .stButton > button { border-radius: 999px; min-height: 2.7rem; font-weight: 600; transition: transform .35s cubic-bezier(.32,.72,0,1), box-shadow .35s cubic-bezier(.32,.72,0,1); }
+      .stButton > button[kind="primary"] { background: var(--accent); border-color: var(--accent); color: #fffdfa; }
+      .stButton > button[kind="primary"]:hover { background: #9f592b; border-color: #9f592b; }
+      .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(184,107,53,.16); }
+      [data-testid="stSidebar"] { background: rgba(255,253,250,.86); }
+      .eyebrow { color: var(--accent); font-size: .72rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; margin-bottom: .4rem; }
+      .hero { background: linear-gradient(135deg, rgba(255,253,250,.96), rgba(243,227,213,.86)); border-radius: 2rem; padding: 2rem 2.2rem; margin-bottom: 1.4rem; box-shadow: 0 18px 50px rgba(38,43,54,.08); }
+      .hero p { color: var(--muted); max-width: 48rem; margin-bottom: 0; }
+      .callout { background: rgba(255,253,250,.9); border-left: 4px solid var(--accent); border-radius: 1rem; padding: 1rem 1.1rem; color: var(--muted); }
     </style>
     """,
     unsafe_allow_html=True,
@@ -636,6 +649,7 @@ def enrich_period_sales(key, df, period, max_rows, plan):
 
     tcg_values = []
     ebay_values = []
+    errors = []
 
     progress = st.progress(0)
     status = st.empty()
@@ -646,9 +660,14 @@ def enrich_period_sales(key, df, period, max_rows, plan):
             sold = get_period_sales(key, row["id"], period)
             tcg_values.append(sold["tcg"])
             ebay_values.append(sold["ebay"])
-        except Exception:
+        except requests.RequestException as exc:
             tcg_values.append(None)
             ebay_values.append(None)
+            errors.append(f"{row['Kortti']}: verkkopyyntö epäonnistui ({exc})")
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            tcg_values.append(None)
+            ebay_values.append(None)
+            errors.append(f"{row['Kortti']}: historiadataa ei voitu lukea ({exc})")
 
         progress.progress(i / len(work))
 
@@ -660,6 +679,7 @@ def enrich_period_sales(key, df, period, max_rows, plan):
 
     work[f"Myyty {period} TCG"] = tcg_values
     work[f"Myyty {period} eBay"] = ebay_values
+    work["_history_errors"] = [errors if i == 0 else [] for i in range(len(work))]
 
     work = work.sort_values(
         [f"Myyty {period} TCG", "7d vs 30d %"],
@@ -668,6 +688,38 @@ def enrich_period_sales(key, df, period, max_rows, plan):
     ).reset_index(drop=True)
 
     return work
+
+
+def build_signal_table(df, period="30d"):
+    """Rank candidates without pretending cumulative sales are a time window."""
+    if df.empty:
+        return df
+
+    work = df.copy()
+    sales_col = f"Myyty {period} TCG"
+    if sales_col in work:
+        sales = pd.to_numeric(work[sales_col], errors="coerce")
+        work["TCG 30d data"] = "Toteutunut jakso"
+    else:
+        sales = pd.to_numeric(work.get("TCG sales hist."), errors="coerce")
+        work["TCG 30d data"] = "Kumulatiivinen proxy"
+
+    momentum = pd.to_numeric(work.get("7d vs 30d %"), errors="coerce").fillna(0)
+    price = pd.to_numeric(work.get("TCG NM"), errors="coerce").fillna(0)
+    sales_score = (sales.fillna(0).clip(lower=0) ** 0.5) * 12
+    momentum_score = momentum.clip(lower=-100, upper=200) * 0.35
+    price_score = pd.to_numeric(work.get("1d vs 7d %"), errors="coerce").fillna(0).clip(-50, 100) * 0.15
+    work["Signal score"] = (sales_score + momentum_score + price_score).round(1)
+    work["Signal"] = "Seurattava"
+    early = (momentum >= 20) & (price_score < 8) & (sales.fillna(0) >= 5)
+    work.loc[early, "Signal"] = "Early trend"
+    strong = (sales.fillna(0) >= 15) & (momentum >= 10)
+    work.loc[strong, "Signal"] = "Vahva kysyntä"
+    return work.sort_values(
+        ["Signal score", "7d vs 30d %"],
+        ascending=[False, False],
+        na_position="last",
+    ).reset_index(drop=True)
 
 
 # ============================================================
@@ -694,22 +746,30 @@ def pricecharting_get(path, token, params):
 # TOP UI
 # ============================================================
 
-st.title("Pokémon Card Scanner")
-st.caption("Raw / ungraded • English by default • US market scanner")
+st.markdown(
+    """
+    <section class="hero">
+      <div class="eyebrow">Market intelligence · raw only</div>
+      <h1>US → EU opportunity scanner</h1>
+      <p>Seulo ensin 5–20 dollarin likvidit kortit, vahvista TCGplayerin toteutunut 30 päivän liike ja tarkista vasta sen jälkeen, onko Eurooppa vielä jäljessä.</p>
+    </section>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.subheader("Scanner")
+    st.subheader("1 · Seulonnan rajat")
 
     col1, col2 = st.columns(2)
     min_price = col1.number_input(
-        "Min $",
+        "Min US$",
         min_value=HARD_MIN_RAW_PRICE,
         value=5.0,
         step=1.0,
-        help="Alle $1 raw-kortit jätetään aina scannerin ulkopuolelle.",
+        help="PokeTrace palauttaa USA:n hinnat dollareina. Tämä ei ole Cardmarket-hinta.",
     )
     max_price = col2.number_input(
-        "Max $", min_value=0.0, value=20.0, step=1.0
+        "Max US$", min_value=0.0, value=20.0, step=1.0
     )
 
     language = st.selectbox(
@@ -736,7 +796,7 @@ with st.sidebar:
     )
 
     coverage_mode = st.selectbox(
-        "Kattavuus",
+        "Settikattavuus",
         ["Tasaisesti kaikki", "Uusimmat", "Vanhimmat"],
         index=0,
         help=(
@@ -755,21 +815,15 @@ with st.sidebar:
         ),
     )
 
-    show_top = st.selectbox(
-        "Näytä Top",
-        [20, 50, 100],
-        index=1,
-    )
+    show_top = st.selectbox("Näytä tuloksia", [20, 50, 100], index=0)
 
     st.info(
-        "Esifiltteri: kaikki alle $1 raw/NM-kortit hylätään heti. "
-        "Niitä ei lisätä candidate-pooliin eikä niille tehdä myöhempiä history-hakuja."
+        "Budjetti on USA-dollareissa, koska TCGplayer/PokeTrace ei tarjoa tässä näkymässä luotettavaa EUR-muunnosta. "
+        "EU-arbitraasi vaatii erillisen Cardmarket- tai RareBit-lähteen."
     )
 
     st.divider()
-    st.caption(
-        "Free PokeTrace: 250 requestia/päivä ja noin 1 request / 2 sekuntia."
-    )
+    st.caption("Raw / English / Near Mint on tämän skannerin vertailustandardi.")
 
 
 # ============================================================
@@ -778,10 +832,10 @@ with st.sidebar:
 
 tab_scan, tab_history, tab_pc, tab_keys = st.tabs(
     [
-        "🔥 Scanner",
-        "🕒 7/14/30d",
-        "💲 PriceCharting",
-        "🔑 API-yhteydet",
+        "01 · Löydä signaali",
+        "02 · Vahvista 30d",
+        "03 · Cross-check",
+        "04 · Datalähteet",
     ]
 )
 
@@ -791,6 +845,13 @@ tab_scan, tab_history, tab_pc, tab_keys = st.tabs(
 # ============================================================
 
 with tab_scan:
+    st.subheader("Löydä USA:n varhainen kysyntä")
+    st.markdown(
+        '<div class="callout"><strong>Työvaihe 1:</strong> skannaa kortit hintaluokasta. '
+        'Tämä löytää ehdokkaat, ei vielä todista arbitraasia. Paina sen jälkeen '
+        '<strong>Vahvista TCGplayer 30d</strong>, jotta ranking perustuu toteutuneisiin myynteihin.</div>',
+        unsafe_allow_html=True,
+    )
     pt_key = provider_key("PokeTrace")
 
     if not pt_key:
@@ -870,6 +931,9 @@ with tab_scan:
                 st.error("Max-hinnan pitää olla vähintään Min-hinta.")
             elif start_scan or continue_scan:
                 try:
+                    if start_scan:
+                        st.session_state.pop("period_result", None)
+                        st.session_state.pop("period_label", None)
                     with st.spinner("Skannataan eri settejä..."):
                         pool_df, batch = scan_across_sets(
                             key=pt_key,
@@ -900,58 +964,74 @@ with tab_scan:
                 "hakee saman tien eri aikakausien settejä."
             )
         else:
-            sort_mode = st.radio(
-                "Järjestys",
-                [
-                    "Eniten historiallisia TCG-myyntihavaintoja",
-                    "7d hintamomentum",
-                    "Eniten eBay-myyntihavaintoja",
-                ],
-                horizontal=True,
+            action, explanation = st.columns([1, 2])
+            enrich_clicked = action.button(
+                "Vahvista TCGplayer 30d",
+                type="primary",
+                use_container_width=True,
+                help="Hakee valituille ehdokkaille päiväkohtaiset TCGplayer-myyntirivit.",
+            )
+            explanation.caption(
+                "Vahvistus kuluttaa history-API-kutsuja. Se on tarkoituksella erillinen vaihe, "
+                "jotta koko korttikatalogia ei haeta kalliilla historiakutsuilla."
             )
 
-            if sort_mode == "Eniten historiallisia TCG-myyntihavaintoja":
-                pool = pool.sort_values(
-                    ["TCG sales hist.", "7d vs 30d %"],
-                    ascending=[False, False],
-                    na_position="last",
+            if enrich_clicked:
+                if not plan_has_history(plan):
+                    st.warning(
+                        f"Nykyinen PokeTrace-plan on {plan}. Oikea TCGplayer 30d -myynti "
+                        "vaatii Pro+-historian; kumulatiivista saleCountia ei käytetä korvikkeena."
+                    )
+                else:
+                    try:
+                        with st.spinner("Haetaan TCGplayerin toteutunut 30 päivän myynti..."):
+                            st.session_state["period_result"] = enrich_period_sales(
+                                pt_key, pool, "30d", min(show_top, 50), plan
+                            )
+                    except (requests.RequestException, RuntimeError, ValueError) as exc:
+                        st.error(f"30 päivän vahvistus epäonnistui: {exc}")
+
+            verified = st.session_state.get("period_result")
+            if (
+                isinstance(verified, pd.DataFrame)
+                and not verified.empty
+                and "Myyty 30d TCG" in verified.columns
+            ):
+                pool = verified
+                st.success(
+                    "Ranking käyttää nyt toteutunutta TCGplayer 30d -myyntiä. "
+                    "EU-hinta ei ole vielä mukana, joten tämä ei yksin ole arbitraasisignaali."
                 )
-            elif sort_mode == "7d hintamomentum":
-                pool = pool.sort_values(
-                    ["7d vs 30d %", "TCG sales hist."],
-                    ascending=[False, False],
-                    na_position="last",
+            ranked = build_signal_table(pool)
+            ranked = ranked.head(show_top).reset_index(drop=True)
+
+            display_columns = [
+                "Kortti",
+                "Setti",
+                "Numero",
+                "Variant",
+                "TCG NM",
+                "Signal",
+                "Signal score",
+                "TCG 30d data",
+                "TCG sales hist.",
+                "TCG 7d avg",
+                "TCG 30d avg",
+                "7d vs 30d %",
+                "eBay sales hist.",
+            ]
+            if "Myyty 30d TCG" in ranked.columns:
+                display_columns.insert(8, "Myyty 30d TCG")
+            display = ranked[display_columns].copy()
+
+            if "Myyty 30d TCG" not in ranked:
+                st.warning(
+                    "Näytössä oleva TCG sales hist. on vain kumulatiivinen seulontaproxy. "
+                    "Se ei ole viimeisen 30 päivän myyntimäärä. Vahvista ehdokkaat 30d-painikkeella."
                 )
             else:
-                pool = pool.sort_values(
-                    ["eBay sales hist.", "7d vs 30d %"],
-                    ascending=[False, False],
-                    na_position="last",
-                )
-
-            pool = pool.head(show_top).reset_index(drop=True)
-
-            display = pool[
-                [
-                    "Kortti",
-                    "Setti",
-                    "Numero",
-                    "Variant",
-                    "TCG NM",
-                    "TCG sales hist.",
-                    "TCG 7d avg",
-                    "TCG 30d avg",
-                    "7d vs 30d %",
-                    "eBay sales hist.",
-                ]
-            ].copy()
-
-            st.warning(
-                "Free-tilan `TCG sales` on PokeTracen kumulatiivinen historiallinen "
-                "saleCount, ei viimeisen 30 päivän määrä. Tämä näkymä rankkaa "
-                "vain ne kortit, jotka on jo skannattu eri seteistä. "
-                "Pro-historylla 7/14/30d-välilehti laskee oikean ajanjakson."
-            )
+                exact = int(pd.to_numeric(ranked["Myyty 30d TCG"], errors="coerce").notna().sum())
+                st.caption(f"Vahvistettuja 30d-myyntilukuja: {exact}/{len(ranked)}. Seuraava vaihe on EU-hinnan haku.")
 
             st.dataframe(
                 display,
@@ -963,6 +1043,12 @@ with tab_scan:
                     "Setti": st.column_config.TextColumn(width="medium"),
                     "Numero": st.column_config.TextColumn(width="small"),
                     "Variant": st.column_config.TextColumn(width="small"),
+                    "Signal": st.column_config.TextColumn("Thesis", width="small"),
+                    "Signal score": st.column_config.NumberColumn("Score", format="%.1f", width="small"),
+                    "TCG 30d data": st.column_config.TextColumn("Datan taso", width="small"),
+                    "Myyty 30d TCG": st.column_config.NumberColumn(
+                        "Myyty 30d", format="%d", width="small"
+                    ),
                     "TCG NM": st.column_config.NumberColumn(
                         "TCG NM", format="$%.2f", width="small"
                     ),
@@ -985,11 +1071,18 @@ with tab_scan:
             )
 
             st.download_button(
-                "Lataa scannerin CSV",
-                pool.to_csv(index=False).encode("utf-8-sig"),
-                file_name="pokemon_scanner_broad_pool.csv",
+                "Lataa rankattu CSV",
+                ranked.to_csv(index=False).encode("utf-8-sig"),
+                file_name="pokemon_us_eu_opportunity_candidates.csv",
                 mime="text/csv",
                 use_container_width=True,
+            )
+
+            st.markdown("#### Mitä tästä puuttuu ennen ostopäätöstä?")
+            st.info(
+                "USA-signaali on nyt mitattavissa: toteutunut 30d-myynti, 7d/30d-hintamomentum ja likviditeetti. "
+                "EU-arbitraasi vaatii vastaavan English/Near Mint/raw-sarjan Cardmarketista tai RareBitistä. "
+                "Sitä ei voi päätellä PriceChartingin loose-price-arvosta."
             )
 
 
@@ -1057,6 +1150,18 @@ with tab_history:
                 result_period = st.session_state.get("period_label", period)
                 tcg_col = f"Myyty {result_period} TCG"
                 ebay_col = f"Myyty {result_period} eBay"
+                history_errors = [
+                    message
+                    for messages in result.get("_history_errors", [])
+                    for message in messages
+                ]
+                if history_errors:
+                    st.warning(
+                        f"{len(history_errors)} kortin historiapyyntö epäonnistui. "
+                        "Tyhjä myyntimäärä ei tarkoita nollaa myyntiä."
+                    )
+                    with st.expander("Näytä virheet"):
+                        st.write("\n".join(history_errors))
 
                 display = result[
                     [
@@ -1115,7 +1220,40 @@ with tab_history:
 with tab_pc:
     pc_token = provider_key("PriceCharting")
 
-    st.subheader("PriceCharting – valinnainen lisälähde")
+    st.subheader("Cross-check: USA-signaali → EU-validointi")
+    st.markdown(
+        '<div class="callout"><strong>Arbitraasi ei ole todistettu</strong>, ennen kuin sama '
+        'kortti, printti, kieli ja Near Mint -kunto löytyy EU-lähteestä. PriceCharting toimii '
+        'tässä tukevana hintataso- ja vuosivolyymin lähteenä, ei Cardmarketin korvikkeena.</div>',
+        unsafe_allow_html=True,
+    )
+    st.write("")
+    st.markdown("#### Datalähteiden tila")
+    eu_status = pd.DataFrame(
+        [
+            {
+                "Lähde": "TCGplayer / PokeTrace",
+                "Rooli": "USA NM hinta + 30d toteutunut myynti",
+                "Tila": "Käytössä" if pt_key else "API-avain puuttuu",
+            },
+            {
+                "Lähde": "CardmarketAPI",
+                "Rooli": "EU EN/NM/raw hinta ja tarjonta",
+                "Tila": "Ei kytketty tähän versioon",
+            },
+            {
+                "Lähde": "RareBit",
+                "Rooli": "EU-historia ja varianttikohtainen vertailu",
+                "Tila": "Ei kytketty tähän versioon",
+            },
+            {
+                "Lähde": "PriceCharting",
+                "Rooli": "Loose-price + yearly sales volume",
+                "Tila": "Käytössä" if pc_token else "Valinnainen token",
+            },
+        ]
+    )
+    st.dataframe(eu_status, use_container_width=True, hide_index=True)
     st.caption(
         "Tätä ei käytetä 7/14/30d myyntimäärän lähteenä. "
         "Integraatio on valmiina yksittäisten tuotteiden hakuun."
@@ -1250,5 +1388,5 @@ CARDMARKETAPI_KEY = "..."
 
 st.divider()
 st.caption(
-    "v0.4.2 • $1 hard pre-filter • broad set scan • raw only"
+    "v0.5 • US market screening + verified TCGplayer 30d • raw / ungraded only"
 )
